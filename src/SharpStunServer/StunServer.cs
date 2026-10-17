@@ -22,7 +22,7 @@
 using Org.BouncyCastle.Security;
 using Org.BouncyCastle.Tls;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
-using SharpStunClient;
+using SharpStunCommon;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -136,6 +136,15 @@ namespace SharpStunServer
         /// one as a server of STUN does.
         /// </summary>
         public bool AuthenticateBinding { get; set; } = true;
+
+        /// <summary>
+        /// Which attributes the server knows: a request of a comprehension-required one it does not is answered 420 (RFC 8489
+        /// 6.3.1). Of STUN and ICE, of none given; a TURN server's, of TURN's too.
+        /// </summary>
+        public Func<ushort, bool> IsKnownAttribute { get; set; } = StunAttributeType.IsKnown;
+
+        /// <summary>The methods of the requests <see cref="AlternateServer"/> redirects: Binding; a TURN server's, Allocate too.</summary>
+        public ICollection<ushort> RedirectedMethods { get; set; } = new HashSet<ushort> { StunMethod.Binding };
 
         /// <summary>The users of the long-term credentials, and their passwords.</summary>
         public IDictionary<string, string> Users { get; set; } = new Dictionary<string, string>();
@@ -480,7 +489,7 @@ namespace SharpStunServer
                         {
                             if (!await ReadAsync(stream, header, 0, 4).ConfigureAwait(false))
                                 return;
-                            if (StunTransport.IsChannelData(header[0]))
+                            if (StunFraming.IsChannelData(header[0]))
                             {
                                 int dataLength = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
                                 byte[] channelData = new byte[4 + ((dataLength + 3) & ~3)];
@@ -552,7 +561,7 @@ namespace SharpStunServer
         /// </summary>
         public void Receive(StunServerConnection connection, byte[] buffer, int offset, int count)
         {
-            if (count >= 4 && StunTransport.IsChannelData(buffer[offset]))
+            if (count >= 4 && StunFraming.IsChannelData(buffer[offset]))
             {
                 DataHandler?.Invoke(connection, buffer, offset, count);
                 return;
@@ -563,7 +572,7 @@ namespace SharpStunServer
             if (request.Class == StunMessageClass.Indication)
             {
                 // of an attribute it is not to be understood without, dropped (RFC 8489 6.3.2)
-                if (request.GetUnknownComprehensionRequired().Count == 0)
+                if (request.GetUnknownComprehensionRequired(_options.IsKnownAttribute).Count == 0)
                     IndicationHandler?.Invoke(request, connection);
                 return;
             }
@@ -586,7 +595,7 @@ namespace SharpStunServer
             }
 
             // of an attribute it is not to be understood without, a 420 that lists them (RFC 8489 6.3.1)
-            var unknown = request.GetUnknownComprehensionRequired();
+            var unknown = request.GetUnknownComprehensionRequired(_options.IsKnownAttribute);
             if (unknown.Count > 0)
             {
                 var error = Error(request, StunErrorCode.UnknownAttribute, "Unknown Attribute").AddUnknownAttributes(unknown);
@@ -594,9 +603,9 @@ namespace SharpStunServer
                 return;
             }
 
-            // a Binding, or an Allocate (RFC 8656 7.2), to another server: of the request's address family (RFC 8489 10); its
-            // certificate's name, of a request of TLS of SHA-256
-            var alternate = request.Method == StunMethod.Binding || request.Method == StunMethod.Allocate ? _options.AlternateServer?.Invoke(from) : null;
+            // a request of a method redirected - a Binding, of a server of TURN an Allocate (RFC 8656 7.2) - to another server: of
+            // the request's address family (RFC 8489 10); its certificate's name, of a request of TLS of SHA-256
+            var alternate = _options.RedirectedMethods.Contains(request.Method) ? _options.AlternateServer?.Invoke(from) : null;
             if (alternate != null && alternate.AddressFamily == from.AddressFamily)
             {
                 var redirect = Error(request, StunErrorCode.TryAlternate, "Try Alternate").AddAddress(alternate, StunAttributeType.AlternateServer);

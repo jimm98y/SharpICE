@@ -20,6 +20,8 @@
 // SOFTWARE.
 
 using SharpStunClient;
+using SharpStunCommon;
+using SharpTurnCommon;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -106,7 +108,6 @@ namespace SharpTurnClient
     /// </summary>
     public sealed class TurnClient : IDisposable
     {
-        private const byte Udp = 17;
         private static readonly TimeSpan PermissionRefresh = TimeSpan.FromMinutes(4);
         private static readonly TimeSpan ChannelRefresh = TimeSpan.FromMinutes(9);
 
@@ -125,7 +126,7 @@ namespace SharpTurnClient
         private readonly Dictionary<IPAddress, Task> _creating = new Dictionary<IPAddress, Task>();
         private readonly Dictionary<ushort, ChannelState> _channels = new Dictionary<ushort, ChannelState>();
         private readonly List<IPEndPoint> _relayed = new List<IPEndPoint>();
-        private ushort _nextChannel = 0x4000;
+        private ushort _nextChannel = TurnConstants.MinChannel;
         private DateTime _expires;
         private Timer _timer;
         private int _maintaining;
@@ -137,6 +138,8 @@ namespace SharpTurnClient
         {
             _client = client ?? throw new ArgumentNullException(nameof(client));
             _ownsClient = ownsClient;
+            // of TURN's attributes, of the responses of a TURN server
+            _client.Options.IsKnownAttribute = TurnAttributeType.IsKnownOfTurn;
             _client.IndicationReceived += OnIndication;
             _client.DataReceived += OnChannelData;
             _client.Closed += OnClosed;
@@ -154,6 +157,7 @@ namespace SharpTurnClient
             if (!StunUri.Parse(uri).IsTurn)
                 throw new ArgumentException($"{uri} is no TURN URI.", nameof(uri));
             options.PreferSha256 = true;
+            options.IsKnownAttribute = TurnAttributeType.IsKnownOfTurn;
             var client = await StunClient.ConnectAsync(uri, options, cancellationToken).ConfigureAwait(false);
             return new TurnClient(client, true);
         }
@@ -205,24 +209,23 @@ namespace SharpTurnClient
         public async Task AllocateAsync(TurnAllocateOptions options = null, CancellationToken cancellationToken = default)
         {
             options ??= new TurnAllocateOptions();
-            var request = new StunMessage(StunMethod.Allocate, StunMessageClass.Request)
-                .AddAttribute(StunAttributeType.RequestedTransport, new byte[] { Udp, 0, 0, 0 });
+            var request = new StunMessage(TurnMethod.Allocate, StunMessageClass.Request).AddRequestedTransport();
             if (options.AddressFamily.HasValue)
-                request.AddAttribute(StunAttributeType.RequestedAddressFamily, new byte[] { Family(options.AddressFamily.Value), 0, 0, 0 });
+                request.AddAddressFamily(TurnAttributeType.RequestedAddressFamily, options.AddressFamily.Value);
             if (options.Dual)
-                request.AddAttribute(StunAttributeType.AdditionalAddressFamily, new byte[] { 2, 0, 0, 0 });
+                request.AddAddressFamily(TurnAttributeType.AdditionalAddressFamily, AddressFamily.InterNetworkV6);
             if (options.Lifetime.HasValue)
-                request.AddUInt32(StunAttributeType.Lifetime, (uint)options.Lifetime.Value.TotalSeconds);
+                request.AddLifetime(options.Lifetime.Value);
             if (options.DontFragment)
-                request.AddAttribute(StunAttributeType.DontFragment, new byte[0]);
+                request.AddAttribute(TurnAttributeType.DontFragment, new byte[0]);
             if (options.EvenPort || options.ReserveNextPort)
-                request.AddAttribute(StunAttributeType.EvenPort, new byte[] { (byte)(options.ReserveNextPort ? 0x80 : 0) });
+                request.AddEvenPort(options.ReserveNextPort);
             if (options.ReservationToken != null)
-                request.AddAttribute(StunAttributeType.ReservationToken, options.ReservationToken);
+                request.AddAttribute(TurnAttributeType.ReservationToken, options.ReservationToken);
             AddSoftware(request);
 
             var response = await RequestAsync(request, cancellationToken).ConfigureAwait(false);
-            var relayed = response.GetXorAddresses(StunAttributeType.XorRelayedAddress).Where(a => a != null).ToList();
+            var relayed = response.GetXorAddresses(TurnAttributeType.XorRelayedAddress).Where(a => a != null).ToList();
             if (relayed.Count == 0)
                 throw new TurnException(StunErrorCode.BadRequest, "The Allocate response has no XOR-RELAYED-ADDRESS.", response);
 
@@ -233,11 +236,9 @@ namespace SharpTurnClient
                 _allocated = true;
             }
             MappedEndPoint = response.GetXorAddress();
-            ReservationToken = response.GetAttribute(StunAttributeType.ReservationToken)?.Value;
-            var addressError = response.GetAttribute(StunAttributeType.AddressErrorCode);
-            AddressError = addressError != null && addressError.Value.Length >= 4
-                ? ((addressError.Value[2] & 0x7) * 100 + addressError.Value[3], System.Text.Encoding.UTF8.GetString(addressError.Value, 4, addressError.Value.Length - 4))
-                : ((int, string)?)null;
+            ReservationToken = response.GetAttribute(TurnAttributeType.ReservationToken)?.Value;
+            var addressError = response.GetAddressError();
+            AddressError = addressError.HasValue ? (addressError.Value.Code, addressError.Value.Reason) : ((int, string)?)null;
             SetLifetime(response);
             _timer ??= new Timer(_ => Maintain(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
         }
@@ -246,18 +247,18 @@ namespace SharpTurnClient
         /// <exception cref="TurnException">Of an error response: of 437, the allocation is gone.</exception>
         public async Task RefreshAsync(TimeSpan? lifetime = null, AddressFamily? family = null, CancellationToken cancellationToken = default)
         {
-            var request = new StunMessage(StunMethod.Refresh, StunMessageClass.Request);
+            var request = new StunMessage(TurnMethod.Refresh, StunMessageClass.Request);
             if (lifetime.HasValue)
-                request.AddUInt32(StunAttributeType.Lifetime, (uint)lifetime.Value.TotalSeconds);
+                request.AddLifetime(lifetime.Value);
             if (family.HasValue)
-                request.AddAttribute(StunAttributeType.RequestedAddressFamily, new byte[] { Family(family.Value), 0, 0, 0 });
+                request.AddAddressFamily(TurnAttributeType.RequestedAddressFamily, family.Value);
             AddSoftware(request);
             try
             {
                 var response = await RequestAsync(request, cancellationToken).ConfigureAwait(false);
                 SetLifetime(response);
             }
-            catch (TurnException ex) when (ex.Code == StunErrorCode.AllocationMismatch)
+            catch (TurnException ex) when (ex.Code == TurnErrorCode.AllocationMismatch)
             {
                 Lost(ex);
                 throw;
@@ -273,13 +274,13 @@ namespace SharpTurnClient
                     return;
                 _allocated = false;
             }
-            var request = new StunMessage(StunMethod.Refresh, StunMessageClass.Request).AddUInt32(StunAttributeType.Lifetime, 0);
+            var request = new StunMessage(TurnMethod.Refresh, StunMessageClass.Request).AddLifetime(TimeSpan.Zero);
             AddSoftware(request);
             try
             {
                 await RequestAsync(request, cancellationToken).ConfigureAwait(false);
             }
-            catch (TurnException ex) when (ex.Code == StunErrorCode.AllocationMismatch)
+            catch (TurnException ex) when (ex.Code == TurnErrorCode.AllocationMismatch)
             {
             }
             finally
@@ -290,8 +291,7 @@ namespace SharpTurnClient
 
         private void SetLifetime(StunMessage response)
         {
-            uint seconds = response.GetUInt32(StunAttributeType.Lifetime) ?? 600;
-            Lifetime = TimeSpan.FromSeconds(seconds);
+            Lifetime = response.GetLifetime() ?? TurnConstants.DefaultLifetime;
             lock (_sync)
                 _expires = DateTime.UtcNow + Lifetime;
         }
@@ -306,9 +306,9 @@ namespace SharpTurnClient
             var addresses = peers.Distinct().ToList();
             if (addresses.Count == 0)
                 return;
-            var request = new StunMessage(StunMethod.CreatePermission, StunMessageClass.Request);
+            var request = new StunMessage(TurnMethod.CreatePermission, StunMessageClass.Request);
             foreach (var address in addresses)
-                request.AddXorAddress(new IPEndPoint(address, 0), StunAttributeType.XorPeerAddress);
+                request.AddXorAddress(new IPEndPoint(address, 0), TurnAttributeType.XorPeerAddress);
             await RequestAsync(request, cancellationToken).ConfigureAwait(false);
             lock (_sync)
             {
@@ -367,7 +367,7 @@ namespace SharpTurnClient
                 channel = _channels.Values.FirstOrDefault(c => c.Peer.Equals(peer));
                 if (channel == null)
                 {
-                    if (_nextChannel > 0x4FFF)
+                    if (_nextChannel > TurnConstants.MaxChannel)
                         throw new InvalidOperationException("Every channel number is bound.");
                     channel = new ChannelState { Number = _nextChannel++, Peer = peer };
                     _channels[channel.Number] = channel;
@@ -379,11 +379,9 @@ namespace SharpTurnClient
 
         private async Task BindAsync(ChannelState channel, CancellationToken cancellationToken)
         {
-            byte[] number = new byte[4];
-            BinaryPrimitives.WriteUInt16BigEndian(number, channel.Number);
-            var request = new StunMessage(StunMethod.ChannelBind, StunMessageClass.Request)
-                .AddAttribute(StunAttributeType.ChannelNumber, number)
-                .AddXorAddress(channel.Peer, StunAttributeType.XorPeerAddress);
+            var request = new StunMessage(TurnMethod.ChannelBind, StunMessageClass.Request)
+                .AddChannelNumber(channel.Number)
+                .AddXorAddress(channel.Peer, TurnAttributeType.XorPeerAddress);
             await RequestAsync(request, cancellationToken).ConfigureAwait(false);
             lock (_sync)
             {
@@ -417,22 +415,18 @@ namespace SharpTurnClient
             if (channel.HasValue)
             {
                 // over a stream, padded to 4 bytes (RFC 8656 12.5)
-                int length = 4 + count;
-                byte[] message = new byte[_client.Transport.IsStream ? (length + 3) & ~3 : length];
-                BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(0), channel.Value);
-                BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(2), (ushort)count);
-                Buffer.BlockCopy(buffer, offset, message, 4, count);
+                byte[] message = TurnChannelData.Create(channel.Value, buffer, offset, count, _client.Transport.IsStream);
                 await _client.SendRawAsync(message, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
             byte[] data = new byte[count];
             Buffer.BlockCopy(buffer, offset, data, 0, count);
-            var indication = new StunMessage(StunMethod.Send, StunMessageClass.Indication)
-                .AddXorAddress(peer, StunAttributeType.XorPeerAddress)
-                .AddAttribute(StunAttributeType.Data, data);
+            var indication = new StunMessage(TurnMethod.Send, StunMessageClass.Indication)
+                .AddXorAddress(peer, TurnAttributeType.XorPeerAddress)
+                .AddAttribute(TurnAttributeType.Data, data);
             if (dontFragment)
-                indication.AddAttribute(StunAttributeType.DontFragment, new byte[0]);
+                indication.AddAttribute(TurnAttributeType.DontFragment, new byte[0]);
             await _client.SendIndicationAsync(indication, cancellationToken).ConfigureAwait(false);
         }
 
@@ -442,18 +436,18 @@ namespace SharpTurnClient
         private void OnIndication(object sender, StunMessageEventArgs e)
         {
             var message = e.Message;
-            if (message.Method != StunMethod.Data)
+            if (message.Method != TurnMethod.Data)
                 return;
-            var peer = message.GetXorAddress(StunAttributeType.XorPeerAddress);
+            var peer = message.GetXorAddress(TurnAttributeType.XorPeerAddress);
             if (peer == null || !HasPermission(peer.Address))
                 return;
-            var icmp = message.GetAttribute(StunAttributeType.Icmp);
-            if (icmp != null && icmp.Value.Length >= 4)
+            var icmp = message.GetIcmp();
+            if (icmp != null)
             {
-                IcmpReceived?.Invoke(this, new TurnIcmpEventArgs(peer, icmp.Value[2], icmp.Value[3]));
+                IcmpReceived?.Invoke(this, new TurnIcmpEventArgs(peer, icmp.Value.Type, icmp.Value.Code));
                 return;
             }
-            var data = message.GetAttribute(StunAttributeType.Data);
+            var data = message.GetAttribute(TurnAttributeType.Data);
             if (data != null)
                 DataReceived?.Invoke(this, new TurnDataEventArgs(peer, data.Value));
         }
@@ -461,11 +455,7 @@ namespace SharpTurnClient
         // ChannelData: of a channel bound, of its peer (RFC 8656 12.6)
         private void OnChannelData(object sender, StunDataEventArgs e)
         {
-            if (e.Count < 4)
-                return;
-            ushort number = BinaryPrimitives.ReadUInt16BigEndian(e.Buffer.AsSpan(e.Offset));
-            int length = BinaryPrimitives.ReadUInt16BigEndian(e.Buffer.AsSpan(e.Offset + 2));
-            if (4 + length > e.Count)
+            if (!TurnChannelData.TryRead(e.Buffer, e.Offset, e.Count, out ushort number, out int dataOffset, out int length))
                 return;
             IPEndPoint peer;
             lock (_sync)
@@ -475,7 +465,7 @@ namespace SharpTurnClient
                 peer = channel.Peer;
             }
             byte[] data = new byte[length];
-            Buffer.BlockCopy(e.Buffer, e.Offset + 4, data, 0, length);
+            Buffer.BlockCopy(e.Buffer, dataOffset, data, 0, length);
             DataReceived?.Invoke(this, new TurnDataEventArgs(peer, data));
         }
 
@@ -525,7 +515,7 @@ namespace SharpTurnClient
             }
         }
 
-        private void OnClosed(object sender, Exception error) => Lost(new TurnException(StunErrorCode.AllocationMismatch, "The connection to the server ended."));
+        private void OnClosed(object sender, Exception error) => Lost(new TurnException(TurnErrorCode.AllocationMismatch, "The connection to the server ended."));
 
         private void Lost(Exception error)
         {
@@ -570,8 +560,6 @@ namespace SharpTurnClient
             if (_client.Options.Software != null)
                 request.AddString(StunAttributeType.Software, _client.Options.Software);
         }
-
-        private static byte Family(AddressFamily family) => family == AddressFamily.InterNetworkV6 ? (byte)2 : (byte)1;
 
         private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 

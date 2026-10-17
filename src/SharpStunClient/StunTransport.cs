@@ -19,6 +19,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+using SharpStunCommon;
 using System;
 using System.Buffers.Binary;
 using System.IO;
@@ -100,9 +101,6 @@ namespace SharpStunClient
             DataReceived?.Invoke(this, new StunDataEventArgs(copy, 0, count));
         }
 
-        /// <summary>Whether data is of a ChannelData message: of its first byte, of 0x40 to 0x4F (RFC 7983, RFC 8656 12).</summary>
-        public static bool IsChannelData(byte first) => first >= 0x40 && first <= 0x4F;
-
         /// <summary>
         /// A transport of the same protocol to another server, of an ALTERNATE-SERVER (RFC 8489 10): of TLS, its certificate of
         /// the domain given, or else of the one this one's was. This one, of UDP, only sent elsewhere.
@@ -163,7 +161,7 @@ namespace SharpStunClient
                 OnMessageReceived(message, from);
                 return true;
             }
-            if (count >= 4 && IsChannelData(buffer[offset]) && from.Equals(RemoteEndPoint))
+            if (count >= 4 && StunFraming.IsChannelData(buffer[offset]) && from.Equals(RemoteEndPoint))
             {
                 OnDataReceived(buffer, offset, count);
                 return true;
@@ -304,7 +302,7 @@ namespace SharpStunClient
                     if (!await ReadExactlyAsync(header, 0, 4).ConfigureAwait(false))
                         break;
                     // ChannelData of TURN: its length, then its data, padded to 4 bytes over a stream (RFC 8656 12.5)
-                    if (IsChannelData(header[0]))
+                    if (StunFraming.IsChannelData(header[0]))
                     {
                         int dataLength = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
                         byte[] channelData = new byte[4 + ((dataLength + 3) & ~3)];

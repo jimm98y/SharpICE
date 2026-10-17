@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SharpStunServer\SharpStunServer.csproj" />
+    <ProjectReference Include="..\SharpTurnCommon\SharpTurnCommon.csproj" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'net481'">

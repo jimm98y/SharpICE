@@ -1,4 +1,6 @@
 ﻿using SharpStunClient;
+using SharpStunCommon;
+using SharpTurnCommon;
 using SharpStunServer;
 using System;
 using System.Collections.Generic;
@@ -73,7 +75,7 @@ namespace SharpICE.Tests
             using var server = new StunServer();
             Assert.IsNull(Ask(server, new StunMessage(StunMethod.Binding, StunMessageClass.Indication)), "an indication");
             Assert.IsNull(Ask(server, new StunMessage(StunMethod.Binding, StunMessageClass.SuccessResponse)), "a response");
-            Assert.IsNull(Ask(server, new StunMessage(StunMethod.Allocate, StunMessageClass.Request)), "a method it does not support");
+            Assert.IsNull(Ask(server, new StunMessage(TurnMethod.Allocate, StunMessageClass.Request)), "a method it does not support");
 
             byte[] bytes = Binding().ToBytes();
             bytes[bytes.Length - 1] ^= 1;

@@ -1,4 +1,4 @@
-﻿// SharpStunClient
+﻿// SharpStunCommon
 // Copyright (C) 2026 Lukas Volf
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -24,7 +24,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace SharpStunClient
+namespace SharpStunCommon
 {
     /// <summary>The algorithms a long-term password is made a key of (RFC 8489 18.5).</summary>
     public enum StunPasswordAlgorithm : ushort

@@ -1,6 +1,8 @@
 ﻿using SharpStunClient;
+using SharpStunCommon;
 using SharpStunServer;
 using SharpTurnClient;
+using SharpTurnCommon;
 using SharpTurnServer;
 using System;
 using System.Collections.Concurrent;
@@ -193,14 +195,14 @@ namespace SharpICE.Tests
 
             // of none: 437
             var error = await Assert.ThrowsExactlyAsync<TurnException>(() => client.RefreshAsync());
-            Assert.AreEqual(StunErrorCode.AllocationMismatch, error.Code);
+            Assert.AreEqual(TurnErrorCode.AllocationMismatch, error.Code);
             error = await Assert.ThrowsExactlyAsync<TurnException>(() => client.CreatePermissionAsync(IPAddress.Loopback));
-            Assert.AreEqual(StunErrorCode.AllocationMismatch, error.Code);
+            Assert.AreEqual(TurnErrorCode.AllocationMismatch, error.Code);
 
             // another Allocate of the 5-tuple: 437 (RFC 8656 7.2)
             await client.AllocateAsync();
             error = await Assert.ThrowsExactlyAsync<TurnException>(() => client.AllocateAsync());
-            Assert.AreEqual(StunErrorCode.AllocationMismatch, error.Code);
+            Assert.AreEqual(TurnErrorCode.AllocationMismatch, error.Code);
         }
 
         [TestMethod]
@@ -213,20 +215,20 @@ namespace SharpICE.Tests
             using var client = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
 
             // of TCP to the peers, 442; of no REQUESTED-TRANSPORT, 400
-            var tcp = new StunMessage(StunMethod.Allocate, StunMessageClass.Request).AddAttribute(StunAttributeType.RequestedTransport, new byte[] { 6, 0, 0, 0 });
-            Assert.AreEqual(StunErrorCode.UnsupportedTransportProtocol, (await client.Client.RequestAsync(tcp)).Error.Value.Code);
-            var none = new StunMessage(StunMethod.Allocate, StunMessageClass.Request);
+            var tcp = new StunMessage(TurnMethod.Allocate, StunMessageClass.Request).AddAttribute(TurnAttributeType.RequestedTransport, new byte[] { 6, 0, 0, 0 });
+            Assert.AreEqual(TurnErrorCode.UnsupportedTransportProtocol, (await client.Client.RequestAsync(tcp)).Error.Value.Code);
+            var none = new StunMessage(TurnMethod.Allocate, StunMessageClass.Request);
             Assert.AreEqual(StunErrorCode.BadRequest, (await client.Client.RequestAsync(none)).Error.Value.Code);
 
             // of IPv6, of a server of no IPv6 relays: 440
             var error = await Assert.ThrowsExactlyAsync<TurnException>(() => client.AllocateAsync(new TurnAllocateOptions { AddressFamily = AddressFamily.InterNetworkV6 }));
-            Assert.AreEqual(StunErrorCode.AddressFamilyNotSupported, error.Code);
+            Assert.AreEqual(TurnErrorCode.AddressFamilyNotSupported, error.Code);
 
             // a second allocation of the user: 486
             await client.AllocateAsync();
             using var second = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
             error = await Assert.ThrowsExactlyAsync<TurnException>(() => second.AllocateAsync());
-            Assert.AreEqual(StunErrorCode.AllocationQuotaReached, error.Code);
+            Assert.AreEqual(TurnErrorCode.AllocationQuotaReached, error.Code);
         }
 
         [TestMethod]
@@ -249,7 +251,7 @@ namespace SharpICE.Tests
                 return request;
             }
             byte[] KeyOf(string user) => StunCredentials.LongTermKey(user, "example.org", "secret", StunPasswordAlgorithm.Sha256);
-            StunMessage Allocate() => new StunMessage(StunMethod.Allocate, StunMessageClass.Request).AddAttribute(StunAttributeType.RequestedTransport, new byte[] { 17, 0, 0, 0 });
+            StunMessage Allocate() => new StunMessage(TurnMethod.Allocate, StunMessageClass.Request).AddAttribute(TurnAttributeType.RequestedTransport, new byte[] { 17, 0, 0, 0 });
 
             var challenge = Ask(Allocate());
             Assert.AreEqual(StunErrorCode.Unauthorized, challenge.Error.Value.Code);
@@ -259,12 +261,12 @@ namespace SharpICE.Tests
 
             // its retransmission: answered again, of the same relayed address (RFC 8656 7.2)
             var again = Ask(allocate, KeyOf("user"));
-            Assert.AreEqual(allocated.GetXorAddress(StunAttributeType.XorRelayedAddress), again.GetXorAddress(StunAttributeType.XorRelayedAddress));
+            Assert.AreEqual(allocated.GetXorAddress(TurnAttributeType.XorRelayedAddress), again.GetXorAddress(TurnAttributeType.XorRelayedAddress));
             Assert.AreEqual(1, server.AllocationCount);
 
             // a Refresh of the other user: 441
-            var refused = Ask(Signed(new StunMessage(StunMethod.Refresh, StunMessageClass.Request), challenge, "other"), KeyOf("other"));
-            Assert.AreEqual(StunErrorCode.WrongCredentials, refused.Error.Value.Code);
+            var refused = Ask(Signed(new StunMessage(TurnMethod.Refresh, StunMessageClass.Request), challenge, "other"), KeyOf("other"));
+            Assert.AreEqual(TurnErrorCode.WrongCredentials, refused.Error.Value.Code);
             Assert.IsTrue(refused.VerifyIntegritySha256(KeyOf("other")), "signed of the credentials it was authenticated of");
         }
 
@@ -301,7 +303,7 @@ namespace SharpICE.Tests
                 await client.AllocateAsync(new TurnAllocateOptions { Dual = true });
 
                 Assert.AreEqual(1, client.RelayedEndPoints.Count, "of IPv4 alone");
-                Assert.AreEqual(StunErrorCode.AddressFamilyNotSupported, client.AddressError.Value.Code);
+                Assert.AreEqual(TurnErrorCode.AddressFamilyNotSupported, client.AddressError.Value.Code);
             }
         }
 
@@ -323,7 +325,7 @@ namespace SharpICE.Tests
             // a token used once is gone: 508
             using var third = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions("other"));
             var error = await Assert.ThrowsExactlyAsync<TurnException>(() => third.AllocateAsync(new TurnAllocateOptions { ReservationToken = first.ReservationToken }));
-            Assert.AreEqual(StunErrorCode.InsufficientCapacity, error.Code);
+            Assert.AreEqual(TurnErrorCode.InsufficientCapacity, error.Code);
         }
 
         [TestMethod]

@@ -10,11 +10,10 @@
   <ItemGroup>
     <InternalsVisibleTo Include="SharpICE.Tests" />
     <InternalsVisibleTo Include="SharpICE" />
-    <InternalsVisibleTo Include="SharpStunServer" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <ProjectReference Include="..\SharpStunCommon\SharpStunCommon.csproj" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'net481'">

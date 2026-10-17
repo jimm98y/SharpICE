@@ -1,4 +1,6 @@
 ﻿using SharpStunClient;
+using SharpStunCommon;
+using SharpTurnCommon;
 using System;
 using System.Linq;
 using System.Net;
@@ -141,9 +143,9 @@ namespace SharpICE.Tests
             Assert.AreEqual(0x0011, StunMessage.GetMessageType(StunMethod.Binding, StunMessageClass.Indication));
             Assert.AreEqual(0x0101, StunMessage.GetMessageType(StunMethod.Binding, StunMessageClass.SuccessResponse));
             Assert.AreEqual(0x0111, StunMessage.GetMessageType(StunMethod.Binding, StunMessageClass.ErrorResponse));
-            Assert.AreEqual(0x0003, StunMessage.GetMessageType(StunMethod.Allocate, StunMessageClass.Request));
-            Assert.AreEqual(0x0113, StunMessage.GetMessageType(StunMethod.Allocate, StunMessageClass.ErrorResponse));
-            Assert.AreEqual(0x0016, StunMessage.GetMessageType(StunMethod.Send, StunMessageClass.Indication));
+            Assert.AreEqual(0x0003, StunMessage.GetMessageType(TurnMethod.Allocate, StunMessageClass.Request));
+            Assert.AreEqual(0x0113, StunMessage.GetMessageType(TurnMethod.Allocate, StunMessageClass.ErrorResponse));
+            Assert.AreEqual(0x0016, StunMessage.GetMessageType(TurnMethod.Send, StunMessageClass.Indication));
         }
 
         [TestMethod]

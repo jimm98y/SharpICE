@@ -1,4 +1,4 @@
-﻿// SharpStunClient
+﻿// SharpStunCommon
 // Copyright (C) 2026 Lukas Volf
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -27,7 +27,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace SharpStunClient
+namespace SharpStunCommon
 {
     /// <summary>
     /// The class of a STUN message (RFC 8489 5): its two bits C1 and C0.
@@ -41,21 +41,15 @@ namespace SharpStunClient
     }
 
     /// <summary>
-    /// STUN methods (RFC 8489 18.2; TURN's of RFC 8656 17).
+    /// STUN methods (RFC 8489 18.2): Binding; TURN's are SharpTurnCommon's TurnMethod.
     /// </summary>
     public static class StunMethod
     {
         public const ushort Binding = 0x001;
-        public const ushort Allocate = 0x003;
-        public const ushort Refresh = 0x004;
-        public const ushort Send = 0x006;
-        public const ushort Data = 0x007;
-        public const ushort CreatePermission = 0x008;
-        public const ushort ChannelBind = 0x009;
     }
 
     /// <summary>
-    /// STUN attribute types (RFC 8489 18.3; ICE's of RFC 8445 16.1; TURN's of RFC 8656 18).
+    /// STUN attribute types (RFC 8489 18.3; ICE's of RFC 8445 16.1); TURN's are SharpTurnCommon's TurnAttributeType.
     /// </summary>
     public static class StunAttributeType
     {
@@ -64,30 +58,17 @@ namespace SharpStunClient
         public const ushort MessageIntegrity = 0x0008;
         public const ushort ErrorCode = 0x0009;
         public const ushort UnknownAttributes = 0x000A;
-        public const ushort ChannelNumber = 0x000C;
-        public const ushort Lifetime = 0x000D;
-        public const ushort XorPeerAddress = 0x0012;
-        public const ushort Data = 0x0013;
         public const ushort Realm = 0x0014;
         public const ushort Nonce = 0x0015;
-        public const ushort XorRelayedAddress = 0x0016;
-        public const ushort RequestedAddressFamily = 0x0017;
-        public const ushort EvenPort = 0x0018;
-        public const ushort RequestedTransport = 0x0019;
-        public const ushort DontFragment = 0x001A;
-        public const ushort ReservationToken = 0x0022;
         public const ushort MessageIntegritySha256 = 0x001C;
         public const ushort PasswordAlgorithm = 0x001D;
         public const ushort Userhash = 0x001E;
         public const ushort XorMappedAddress = 0x0020;
         public const ushort Priority = 0x0024;
         public const ushort UseCandidate = 0x0025;
-        public const ushort AdditionalAddressFamily = 0x8000;
-        public const ushort AddressErrorCode = 0x8001;
         public const ushort PasswordAlgorithms = 0x8002;
         public const ushort AlternateDomain = 0x8003;
         public const ushort Software = 0x8022;
-        public const ushort Icmp = 0x8004;
         public const ushort AlternateServer = 0x8023;
         public const ushort Fingerprint = 0x8028;
         public const ushort IceControlled = 0x8029;
@@ -95,13 +76,12 @@ namespace SharpStunClient
 
         private static readonly HashSet<ushort> Known = new HashSet<ushort>
         {
-            MappedAddress, Username, MessageIntegrity, ErrorCode, UnknownAttributes, ChannelNumber, Lifetime, XorPeerAddress, Data,
-            Realm, Nonce, XorRelayedAddress, RequestedAddressFamily, EvenPort, RequestedTransport, DontFragment, ReservationToken,
-            MessageIntegritySha256, PasswordAlgorithm, Userhash, XorMappedAddress, Priority, UseCandidate, AdditionalAddressFamily,
-            AddressErrorCode, PasswordAlgorithms, AlternateDomain, Icmp, Software, AlternateServer, Fingerprint, IceControlled, IceControlling,
+            MappedAddress, Username, MessageIntegrity, ErrorCode, UnknownAttributes, Realm, Nonce, MessageIntegritySha256,
+            PasswordAlgorithm, Userhash, XorMappedAddress, Priority, UseCandidate, PasswordAlgorithms, AlternateDomain, Software,
+            AlternateServer, Fingerprint, IceControlled, IceControlling,
         };
 
-        /// <summary>Whether the attribute is one of these, which this library reads.</summary>
+        /// <summary>Whether the attribute is one of these, of STUN and of ICE; of TURN, see TurnAttributeType.IsKnownOfTurn.</summary>
         public static bool IsKnown(ushort type) => Known.Contains(type);
 
         /// <summary>
@@ -125,25 +105,17 @@ namespace SharpStunClient
     }
 
     /// <summary>
-    /// STUN error codes (RFC 8489 14.8, RFC 8445 7.3.1.1; TURN's of RFC 8656 19).
+    /// STUN error codes (RFC 8489 14.8, RFC 8445 7.3.1.1); TURN's are SharpTurnCommon's TurnErrorCode.
     /// </summary>
     public static class StunErrorCode
     {
         public const int TryAlternate = 300;
         public const int BadRequest = 400;
         public const int Unauthorized = 401;
-        public const int Forbidden = 403;
         public const int UnknownAttribute = 420;
-        public const int AllocationMismatch = 437;
         public const int StaleNonce = 438;
-        public const int AddressFamilyNotSupported = 440;
-        public const int WrongCredentials = 441;
-        public const int UnsupportedTransportProtocol = 442;
-        public const int PeerAddressFamilyMismatch = 443;
-        public const int AllocationQuotaReached = 486;
         public const int RoleConflict = 487;
         public const int ServerError = 500;
-        public const int InsufficientCapacity = 508;
     }
 
     /// <summary>

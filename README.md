@@ -1,10 +1,20 @@
 # SharpICE
 STUN, TURN and ICE written in C#, netstandard2.0 and NET10 without any native dependencies.
 
-## SharpStunClient
-STUN messages and a STUN client:
+## SharpStunCommon
+What a STUN client and a STUN server share:
 1. Session Traversal Utilities for NAT (STUN) [RFC8489](https://www.rfc-editor.org/rfc/rfc8489): messages of every method and class, their attributes, MESSAGE-INTEGRITY, MESSAGE-INTEGRITY-SHA256 and FINGERPRINT
-1. Long-term credentials: the MD5 and SHA-256 keys, PASSWORD-ALGORITHMS, USERHASH, the nonce cookie's security features, stale nonces, and responses checked of their integrity
+1. The keys of the long-term credentials, MD5 and SHA-256, of OpaqueString; USERHASH; the nonce cookie and its security features
+1. The constants of STUN's methods, attributes and error codes, and of ICE's
+1. What else shares a transport of STUN: ChannelData, of its first byte [RFC7983](https://www.rfc-editor.org/rfc/rfc7983)
+1. The certificates of TLS and DTLS: loaded, and checked of a host name
+
+## SharpTurnCommon
+What a TURN client and a TURN server share, of SharpStunCommon: the constants of TURN's methods, attributes and error codes [RFC8656](https://www.rfc-editor.org/rfc/rfc8656); its attributes written and read - REQUESTED-TRANSPORT, the address families, EVEN-PORT, CHANNEL-NUMBER, LIFETIME, ADDRESS-ERROR-CODE, ICMP; and ChannelData, padded over a stream.
+
+## SharpStunClient
+A STUN client, of SharpStunCommon:
+1. Long-term credentials: PASSWORD-ALGORITHMS, USERHASH, stale nonces, and responses checked of their integrity
 1. Short-term credentials, as ICE's
 1. UDP, retransmitted; TCP; TLS over it; and DTLS over UDP, of BouncyCastle: the server's certificate checked of its host name
 1. ALTERNATE-SERVER and ALTERNATE-DOMAIN: a request redirected, never twice to one server
@@ -29,11 +39,11 @@ IPEndPoint address = await StunClient.GetMappedAddressAsync(server, TimeSpan.Fro
 ```
 
 ## SharpStunServer
-A STUN server of the Binding method [RFC8489](https://www.rfc-editor.org/rfc/rfc8489):
+A STUN server of the Binding method [RFC8489](https://www.rfc-editor.org/rfc/rfc8489), of SharpStunCommon alone - not of SharpStunClient:
 1. Over UDP, TCP, TLS and DTLS, each listener of its own; DTLS of a cookie exchange [RFC6347](https://www.rfc-editor.org/rfc/rfc6347) before any association
 1. Long-term credentials, if a realm is given: the checks of RFC 8489 9.2.4 in their order, MD5 and SHA-256, USERHASH, stateless nonces of the nonce cookie and of the source, stale ones answered 438
 1. ALTERNATE-SERVER and ALTERNATE-DOMAIN, of the request's source
-1. Unknown comprehension-required attributes answered with a 420; indications, responses and other methods dropped
+1. Unknown comprehension-required attributes answered with a 420 - which attributes are known an option, as are the methods redirected; indications, responses and other methods dropped
 1. `Process` of a transport of the caller's
 
 Classic STUN of RFC 3489, of no magic cookie, is not answered. A DTLS ClientHello fragmented into several records - as OpenSSL sends one when it cannot learn the path's MTU - is not taken, as BouncyCastle's cookie exchange does not reassemble it.

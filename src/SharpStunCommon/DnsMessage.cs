@@ -1,4 +1,4 @@
-﻿// SharpStunClient
+﻿// SharpStunCommon
 // Copyright (C) 2026 Lukas Volf
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -25,7 +25,7 @@ using System.Collections.Generic;
 using System.Net;
 using System.Text;
 
-namespace SharpStunClient
+namespace SharpStunCommon
 {
     /// <summary>A resource record of a DNS message (RFC 1035 4.1.3): where its data is in the message it was read of.</summary>
     internal sealed class DnsRecord

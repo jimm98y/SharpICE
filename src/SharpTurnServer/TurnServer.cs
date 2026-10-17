@@ -19,7 +19,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-using SharpStunClient;
+using SharpStunCommon;
+using SharpTurnCommon;
 using SharpStunServer;
 using System;
 using System.Buffers.Binary;
@@ -66,8 +67,8 @@ namespace SharpTurnServer
         public int PortMax { get; set; } = 65535;
 
         /// <summary>The lifetime of an allocation, and the longest a client may ask for (RFC 8656 7.2: an hour at most).</summary>
-        public TimeSpan DefaultLifetime { get; set; } = TimeSpan.FromSeconds(600);
-        public TimeSpan MaxLifetime { get; set; } = TimeSpan.FromSeconds(3600);
+        public TimeSpan DefaultLifetime { get; set; } = TurnConstants.DefaultLifetime;
+        public TimeSpan MaxLifetime { get; set; } = TurnConstants.MaxLifetime;
 
         /// <summary>How many allocations a user may have at once; more are answered 486.</summary>
         public int MaxAllocationsPerUser { get; set; } = 10;
@@ -104,10 +105,9 @@ namespace SharpTurnServer
     /// </remarks>
     public sealed class TurnServer : IDisposable
     {
-        public static readonly TimeSpan PermissionLifetime = TimeSpan.FromSeconds(300);
-        public static readonly TimeSpan ChannelLifetime = TimeSpan.FromSeconds(600);
+        public static readonly TimeSpan PermissionLifetime = TurnConstants.PermissionLifetime;
+        public static readonly TimeSpan ChannelLifetime = TurnConstants.ChannelLifetime;
         private static readonly TimeSpan ReservationLifetime = TimeSpan.FromSeconds(30);
-        private const byte Udp = 17;
 
         private sealed class Relay
         {
@@ -132,7 +132,7 @@ namespace SharpTurnServer
             public string Username;
             public byte[] TransactionId;
             public byte[] ReservationToken;
-            public StunMessage AddressError;
+            public (int Code, string Reason)? AddressError;
             public readonly List<Relay> Relays = new List<Relay>();
             public readonly Dictionary<IPAddress, DateTime> Permissions = new Dictionary<IPAddress, DateTime>();
             public readonly Dictionary<ushort, Channel> Channels = new Dictionary<ushort, Channel>();
@@ -160,6 +160,9 @@ namespace SharpTurnServer
         public TurnServer(TurnServerOptions options = null)
         {
             _options = options ?? new TurnServerOptions();
+            // of TURN's attributes, and its Allocate redirected as a Binding is
+            _options.Stun.IsKnownAttribute = TurnAttributeType.IsKnownOfTurn;
+            _options.Stun.RedirectedMethods.Add(TurnMethod.Allocate);
             _stun = new StunServer(_options.Stun)
             {
                 RequestHandler = OnRequest,
@@ -192,13 +195,13 @@ namespace SharpTurnServer
         {
             switch (request.Message.Method)
             {
-                case StunMethod.Allocate:
+                case TurnMethod.Allocate:
                     return Allocate(request);
-                case StunMethod.Refresh:
+                case TurnMethod.Refresh:
                     return OfAllocation(request, Refresh);
-                case StunMethod.CreatePermission:
+                case TurnMethod.CreatePermission:
                     return OfAllocation(request, CreatePermission);
-                case StunMethod.ChannelBind:
+                case TurnMethod.ChannelBind:
                     return OfAllocation(request, ChannelBind);
                 default:
                     return null;
@@ -212,9 +215,9 @@ namespace SharpTurnServer
             lock (_sync)
                 _allocations.TryGetValue(request.Connection.Key, out allocation);
             if (allocation == null || allocation.Closed)
-                return request.Error(StunErrorCode.AllocationMismatch, "Allocation Mismatch");
+                return request.Error(TurnErrorCode.AllocationMismatch, "Allocation Mismatch");
             if (_options.Stun.Realm != null && allocation.Username != request.Username)
-                return request.Error(StunErrorCode.WrongCredentials, "Wrong Credentials");
+                return request.Error(TurnErrorCode.WrongCredentials, "Wrong Credentials");
             return handler(request, allocation);
         }
 
@@ -229,45 +232,41 @@ namespace SharpTurnServer
                 {
                     return existing.TransactionId.SequenceEqual(message.TransactionId)
                         ? Allocated(request, existing)
-                        : request.Error(StunErrorCode.AllocationMismatch, "Allocation Mismatch");
+                        : request.Error(TurnErrorCode.AllocationMismatch, "Allocation Mismatch");
                 }
             }
 
-            var transport = message.GetAttribute(StunAttributeType.RequestedTransport);
-            if (transport == null || transport.Value.Length != 4)
+            byte? transport = message.GetRequestedTransport();
+            if (transport == null)
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
-            if (transport.Value[0] != Udp)
-                return request.Error(StunErrorCode.UnsupportedTransportProtocol, "Unsupported Transport Protocol");
+            if (transport != TurnConstants.Udp)
+                return request.Error(TurnErrorCode.UnsupportedTransportProtocol, "Unsupported Transport Protocol");
 
-            var token = message.GetAttribute(StunAttributeType.ReservationToken);
-            var evenPort = message.GetAttribute(StunAttributeType.EvenPort);
-            var requestedFamily = message.GetAttribute(StunAttributeType.RequestedAddressFamily);
-            var additionalFamily = message.GetAttribute(StunAttributeType.AdditionalAddressFamily);
-            bool reserveNext = evenPort != null && evenPort.Value.Length >= 1 && (evenPort.Value[0] & 0x80) != 0;
+            var token = message.GetAttribute(TurnAttributeType.ReservationToken);
+            bool? evenPort = message.GetEvenPort();
+            var requestedFamily = message.GetAddressFamily(TurnAttributeType.RequestedAddressFamily);
+            var additionalFamily = message.GetAddressFamily(TurnAttributeType.AdditionalAddressFamily);
+            bool reserveNext = evenPort == true;
             if (token != null && (evenPort != null || requestedFamily != null || additionalFamily != null))
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
             if (requestedFamily != null && additionalFamily != null)
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
             if (reserveNext && additionalFamily != null)
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
-            if (additionalFamily != null && (additionalFamily.Value.Length < 1 || additionalFamily.Value[0] != 2))
+            if (additionalFamily != null && additionalFamily != AddressFamily.InterNetworkV6)
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
 
             // the family asked for, IPv4 of none (RFC 8656 7.2)
-            var family = AddressFamily.InterNetwork;
-            if (requestedFamily != null)
-            {
-                if (requestedFamily.Value.Length < 1 || requestedFamily.Value[0] != 1 && requestedFamily.Value[0] != 2)
-                    return request.Error(StunErrorCode.AddressFamilyNotSupported, "Address Family not Supported");
-                family = requestedFamily.Value[0] == 2 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork;
-            }
+            var family = requestedFamily ?? AddressFamily.InterNetwork;
+            if (family == AddressFamily.Unknown)
+                return request.Error(TurnErrorCode.AddressFamilyNotSupported, "Address Family not Supported");
             if (token == null && RelayAddressOf(family, request.Connection) == null)
-                return request.Error(StunErrorCode.AddressFamilyNotSupported, "Address Family not Supported");
+                return request.Error(TurnErrorCode.AddressFamilyNotSupported, "Address Family not Supported");
 
             lock (_sync)
             {
                 if (request.Username != null && _allocations.Values.Count(a => a.Username == request.Username) >= _options.MaxAllocationsPerUser)
-                    return request.Error(StunErrorCode.AllocationQuotaReached, "Allocation Quota Reached");
+                    return request.Error(TurnErrorCode.AllocationQuotaReached, "Allocation Quota Reached");
             }
 
             DateTime expires = DateTime.UtcNow + Lifetime(message, false);
@@ -292,7 +291,7 @@ namespace SharpTurnServer
                 if (reservation == null || reservation.Expires < DateTime.UtcNow)
                 {
                     reservation?.Socket.Dispose();
-                    return request.Error(StunErrorCode.InsufficientCapacity, "Insufficient Capacity");
+                    return request.Error(TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
                 }
                 allocation.Relays.Add(MakeRelay(reservation.Socket, expires));
             }
@@ -302,7 +301,7 @@ namespace SharpTurnServer
                 Socket reserved = null;
                 var socket = evenPort != null ? BindEven(address, reserveNext, out reserved) : Bind(address);
                 if (socket == null)
-                    return request.Error(StunErrorCode.InsufficientCapacity, "Insufficient Capacity");
+                    return request.Error(TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
                 allocation.Relays.Add(MakeRelay(socket, expires));
                 if (reserved != null)
                 {
@@ -322,8 +321,7 @@ namespace SharpTurnServer
                     if (second != null)
                         allocation.Relays.Add(MakeRelay(second, expires));
                     else
-                        allocation.AddressError = new StunMessage(StunMethod.Allocate, StunMessageClass.SuccessResponse)
-                            .AddError(v6 == null ? StunErrorCode.AddressFamilyNotSupported : StunErrorCode.InsufficientCapacity, v6 == null ? "Address Family not Supported" : "Insufficient Capacity");
+                        allocation.AddressError = v6 == null ? (TurnErrorCode.AddressFamilyNotSupported, "Address Family not Supported") : (TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
                 }
             }
 
@@ -339,18 +337,14 @@ namespace SharpTurnServer
         {
             var response = request.Success();
             foreach (var relay in allocation.Relays)
-                response.AddXorAddress(relay.Advertised, StunAttributeType.XorRelayedAddress);
-            response.AddUInt32(StunAttributeType.Lifetime, Seconds(allocation.Relays.Max(r => r.Expires) - DateTime.UtcNow));
+                response.AddXorAddress(relay.Advertised, TurnAttributeType.XorRelayedAddress);
+            response.AddLifetime(allocation.Relays.Max(r => r.Expires) - DateTime.UtcNow);
             if (allocation.ReservationToken != null)
-                response.AddAttribute(StunAttributeType.ReservationToken, allocation.ReservationToken);
+                response.AddAttribute(TurnAttributeType.ReservationToken, allocation.ReservationToken);
             response.AddXorAddress(request.Connection.RemoteEndPoint);
+            // of IPv6, the family not allocated (RFC 8656 18.12)
             if (allocation.AddressError != null)
-            {
-                // ADDRESS-ERROR-CODE: of IPv6, the family not allocated, then as an ERROR-CODE is (RFC 8656 18.12)
-                byte[] error = allocation.AddressError.GetAttribute(StunAttributeType.ErrorCode).Value.ToArray();
-                error[0] = 2;
-                response.AddAttribute(StunAttributeType.AddressErrorCode, error);
-            }
+                response.AddAddressError(AddressFamily.InterNetworkV6, allocation.AddressError.Value.Code, allocation.AddressError.Value.Reason);
             return response;
         }
 
@@ -358,16 +352,15 @@ namespace SharpTurnServer
         {
             var message = request.Message;
             List<Relay> relays;
-            var requestedFamily = message.GetAttribute(StunAttributeType.RequestedAddressFamily);
+            var requestedFamily = message.GetAddressFamily(TurnAttributeType.RequestedAddressFamily);
             lock (_sync)
             {
                 relays = allocation.Relays.ToList();
                 if (requestedFamily != null)
                 {
-                    var family = requestedFamily.Value.Length >= 1 && requestedFamily.Value[0] == 2 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork;
-                    relays = relays.Where(r => r.Family == family).ToList();
+                    relays = relays.Where(r => r.Family == requestedFamily.Value).ToList();
                     if (relays.Count == 0)
-                        return request.Error(StunErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
+                        return request.Error(TurnErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
                 }
             }
 
@@ -377,7 +370,7 @@ namespace SharpTurnServer
             {
                 foreach (var relay in relays)
                     RemoveRelay(allocation, relay, "deleted by its client");
-                response.AddUInt32(StunAttributeType.Lifetime, 0);
+                response.AddLifetime(TimeSpan.Zero);
                 return response;
             }
             lock (_sync)
@@ -385,22 +378,22 @@ namespace SharpTurnServer
                 foreach (var relay in relays)
                     relay.Expires = DateTime.UtcNow + lifetime;
             }
-            response.AddUInt32(StunAttributeType.Lifetime, Seconds(lifetime));
+            response.AddLifetime(lifetime);
             return response;
         }
 
         private StunMessage CreatePermission(StunServerRequest request, Allocation allocation)
         {
-            var peers = request.Message.GetXorAddresses(StunAttributeType.XorPeerAddress);
+            var peers = request.Message.GetXorAddresses(TurnAttributeType.XorPeerAddress);
             if (peers.Count == 0 || peers.Any(p => p == null))
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
             lock (_sync)
             {
                 if (peers.Any(p => allocation.RelayOf(p.AddressFamily) == null))
-                    return request.Error(StunErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
+                    return request.Error(TurnErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
             }
             if (_options.AllowPeer != null && peers.Any(p => !_options.AllowPeer(p)))
-                return request.Error(StunErrorCode.Forbidden, "Forbidden");
+                return request.Error(TurnErrorCode.Forbidden, "Forbidden");
             lock (_sync)
             {
                 foreach (var peer in peers)
@@ -412,20 +405,20 @@ namespace SharpTurnServer
         private StunMessage ChannelBind(StunServerRequest request, Allocation allocation)
         {
             var message = request.Message;
-            var number = message.GetAttribute(StunAttributeType.ChannelNumber);
-            var peer = message.GetXorAddress(StunAttributeType.XorPeerAddress);
-            if (number == null || number.Value.Length != 4 || peer == null)
+            ushort? number = message.GetChannelNumber();
+            var peer = message.GetXorAddress(TurnAttributeType.XorPeerAddress);
+            if (number == null || peer == null)
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
-            ushort channel = BinaryPrimitives.ReadUInt16BigEndian(number.Value);
-            if (channel < 0x4000 || channel > 0x4FFF)
+            ushort channel = number.Value;
+            if (channel < TurnConstants.MinChannel || channel > TurnConstants.MaxChannel)
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
             lock (_sync)
             {
                 if (allocation.RelayOf(peer.AddressFamily) == null)
-                    return request.Error(StunErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
+                    return request.Error(TurnErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
             }
             if (_options.AllowPeer != null && !_options.AllowPeer(peer))
-                return request.Error(StunErrorCode.Forbidden, "Forbidden");
+                return request.Error(TurnErrorCode.Forbidden, "Forbidden");
 
             lock (_sync)
             {
@@ -445,16 +438,14 @@ namespace SharpTurnServer
         // the lifetime asked for, of the default and the maximum (RFC 8656 7.2, 8.2): of a Refresh of 0, 0
         private TimeSpan Lifetime(StunMessage message, bool refresh)
         {
-            uint? asked = message.GetUInt32(StunAttributeType.Lifetime);
-            if (refresh && asked == 0)
+            TimeSpan? asked = message.GetLifetime();
+            if (refresh && asked == TimeSpan.Zero)
                 return TimeSpan.Zero;
             if (asked == null)
                 return _options.DefaultLifetime;
-            var lifetime = TimeSpan.FromSeconds(Math.Min(asked.Value, _options.MaxLifetime.TotalSeconds));
+            var lifetime = asked.Value < _options.MaxLifetime ? asked.Value : _options.MaxLifetime;
             return lifetime > _options.DefaultLifetime ? lifetime : _options.DefaultLifetime;
         }
-
-        private static uint Seconds(TimeSpan time) => (uint)Math.Max(0, Math.Round(time.TotalSeconds));
 
         #endregion // Requests
 
@@ -594,19 +585,15 @@ namespace SharpTurnServer
                 byte[] message;
                 if (channel != null)
                 {
-                    int length = 4 + count;
-                    message = new byte[allocation.Connection.IsStream ? (length + 3) & ~3 : length];
-                    BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(0), channel.Number);
-                    BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(2), (ushort)count);
-                    Buffer.BlockCopy(buffer, 0, message, 4, count);
+                    message = TurnChannelData.Create(channel.Number, buffer, 0, count, allocation.Connection.IsStream);
                 }
                 else
                 {
                     byte[] data = new byte[count];
                     Buffer.BlockCopy(buffer, 0, data, 0, count);
-                    message = new StunMessage(StunMethod.Data, StunMessageClass.Indication)
-                        .AddXorAddress(peer, StunAttributeType.XorPeerAddress)
-                        .AddAttribute(StunAttributeType.Data, data)
+                    message = new StunMessage(TurnMethod.Data, StunMessageClass.Indication)
+                        .AddXorAddress(peer, TurnAttributeType.XorPeerAddress)
+                        .AddAttribute(TurnAttributeType.Data, data)
                         .ToBytes(null, false);
                 }
                 allocation.Connection.Send(message);
@@ -616,23 +603,21 @@ namespace SharpTurnServer
         // a Send indication: to a peer of a permission, of the DF bit of a DONT-FRAGMENT (RFC 8656 11.2)
         private void OnIndication(StunMessage indication, StunServerConnection connection)
         {
-            if (indication.Method != StunMethod.Send)
+            if (indication.Method != TurnMethod.Send)
                 return;
-            var peer = indication.GetXorAddress(StunAttributeType.XorPeerAddress);
-            var data = indication.GetAttribute(StunAttributeType.Data);
+            var peer = indication.GetXorAddress(TurnAttributeType.XorPeerAddress);
+            var data = indication.GetAttribute(TurnAttributeType.Data);
             if (peer == null || data == null)
                 return;
             if (_options.AllowPeer != null && !_options.AllowPeer(peer))
                 return;
-            SendToPeer(connection.Key, peer, data.Value, 0, data.Value.Length, indication.HasAttribute(StunAttributeType.DontFragment), true);
+            SendToPeer(connection.Key, peer, data.Value, 0, data.Value.Length, indication.HasAttribute(TurnAttributeType.DontFragment), true);
         }
 
         // ChannelData of the client's: of a channel bound, to its peer (RFC 8656 12.6)
         private void OnChannelData(StunServerConnection connection, byte[] buffer, int offset, int count)
         {
-            ushort number = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(offset));
-            int length = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(offset + 2));
-            if (number > 0x4FFF || 4 + length > count)
+            if (!TurnChannelData.TryRead(buffer, offset, count, out ushort number, out int dataOffset, out int length))
                 return;
             IPEndPoint peer;
             lock (_sync)
@@ -641,7 +626,7 @@ namespace SharpTurnServer
                     return;
                 peer = channel.Peer;
             }
-            SendToPeer(connection.Key, peer, buffer, offset + 4, length, false, false);
+            SendToPeer(connection.Key, peer, buffer, dataOffset, length, false, false);
         }
 
         private void SendToPeer(string key, IPEndPoint peer, byte[] buffer, int offset, int count, bool dontFragment, bool checkPermission)

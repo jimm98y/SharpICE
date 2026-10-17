@@ -1,4 +1,4 @@
-﻿// SharpStunClient
+﻿// SharpStunCommon
 // Copyright (C) 2026 Lukas Volf
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -19,7 +19,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-namespace SharpStunClient
+namespace SharpStunCommon
 {
     /// <summary>
     /// The CRC-32 of ISO 3309 / ITU-T V.42, which STUN's FINGERPRINT is of (RFC 8489 14.7): the reflected polynomial

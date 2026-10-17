@@ -20,6 +20,7 @@
 // SOFTWARE.
 
 using SharpStunClient;
+using SharpStunCommon;
 using SharpTurnClient;
 using System;
 using System.Collections.Generic;

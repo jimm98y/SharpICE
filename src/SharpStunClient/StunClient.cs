@@ -19,6 +19,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+using SharpStunCommon;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -70,6 +71,12 @@ namespace SharpStunClient
         /// is to (RFC 8656 6), rather than the first of the list (RFC 8489 9.2.5).
         /// </summary>
         public bool PreferSha256 { get; set; }
+
+        /// <summary>
+        /// Which attributes the client knows: a response of a comprehension-required one it does not fails its transaction (RFC
+        /// 8489 6.3.3). Of STUN and ICE, of none given; a TURN client's, of TURN's too.
+        /// </summary>
+        public Func<ushort, bool> IsKnownAttribute { get; set; } = StunAttributeType.IsKnown;
     }
 
     /// <summary>A transaction that failed otherwise than of no answer, or of an error response: what failed, and the response of it.</summary>
@@ -260,7 +267,7 @@ namespace SharpStunClient
                 }
 
                 // of a server of classic STUN, its retired attributes taken as known (RFC 8489 18.3.1)
-                var unknown = response.GetUnknownComprehensionRequired(t => StunAttributeType.IsKnown(t) || StunAttributeType.IsRetired(t));
+                var unknown = response.GetUnknownComprehensionRequired(t => _options.IsKnownAttribute(t) || StunAttributeType.IsRetired(t));
                 if (unknown.Count > 0)
                     throw new StunException($"The response is of attributes it is not to be understood without: {string.Join(", ", unknown.Select(t => "0x" + t.ToString("X4")))}.", response);
 

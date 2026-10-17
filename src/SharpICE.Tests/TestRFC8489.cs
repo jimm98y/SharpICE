@@ -1,4 +1,6 @@
 ﻿using SharpStunClient;
+using SharpStunCommon;
+using SharpTurnCommon;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -192,7 +194,7 @@ namespace SharpICE.Tests
         [TestMethod]
         public void ReadsAndWritesThePasswordAlgorithms()
         {
-            var message = new StunMessage(StunMethod.Allocate, StunMessageClass.ErrorResponse, TransactionId)
+            var message = new StunMessage(TurnMethod.Allocate, StunMessageClass.ErrorResponse, TransactionId)
                 .AddPasswordAlgorithms(StunPasswordAlgorithm.Sha256, StunPasswordAlgorithm.Md5)
                 .AddPasswordAlgorithm(StunPasswordAlgorithm.Sha256);
             CollectionAssert.AreEqual(Hex("00 02 00 00 00 01 00 00"), message.GetAttribute(StunAttributeType.PasswordAlgorithms).Value);
@@ -203,7 +205,7 @@ namespace SharpICE.Tests
             Assert.AreEqual((ushort)2, read.PasswordAlgorithm);
 
             // an algorithm of parameters, padded: skipped over to the next
-            var withParameters = new StunMessage(StunMethod.Allocate, StunMessageClass.ErrorResponse, TransactionId)
+            var withParameters = new StunMessage(TurnMethod.Allocate, StunMessageClass.ErrorResponse, TransactionId)
                 .AddAttribute(StunAttributeType.PasswordAlgorithms, Hex("00 07 00 03 aa bb cc 00 00 01 00 00"));
             CollectionAssert.AreEqual(new List<ushort> { 7, 1 }, withParameters.PasswordAlgorithms);
         }
