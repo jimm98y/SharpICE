@@ -258,7 +258,11 @@ namespace SharpICE
 
         #region Gathering
 
-        /// <summary>The local addresses to gather candidates of: of the interfaces that are up, as the options choose.</summary>
+        /// <summary>
+        /// The local addresses to gather candidates of: of the interfaces that are up, as the options choose, of no address being
+        /// deprecated or not yet sure of (of its duplicate address detection); in the order of RFC 8421 4, of IPv6 first and the
+        /// families intermingled.
+        /// </summary>
         private List<IPAddress> GetLocalAddresses()
         {
             var addresses = new List<IPAddress>();
@@ -273,7 +277,7 @@ namespace SharpICE
                     var address = unicast.Address;
                     if (address.AddressFamily == AddressFamily.InterNetworkV6)
                     {
-                        if (!_options.IncludeIPv6 || address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6Multicast)
+                        if (!_options.IncludeIPv6 || !IsUsableIPv6(address) || !IsPreferred(unicast))
                             continue;
                     }
                     else if (address.AddressFamily != AddressFamily.InterNetwork)
@@ -285,13 +289,73 @@ namespace SharpICE
 
                     if (isLoopback || IPAddress.IsLoopback(address))
                         loopback.Add(address);
-                    else
+                    else if (!addresses.Contains(address))
                         addresses.Add(address);
                 }
             }
             if (_options.IncludeLoopback || addresses.Count == 0)
                 addresses.AddRange(loopback);
-            return addresses;
+            return Intermingle(addresses);
+        }
+
+        /// <summary>
+        /// Whether an IPv6 address is one a peer may reach (RFC 8421, RFC 6724): not link-local nor site-local, whose zone a peer
+        /// has no part in; not multicast; not of IPv4 in IPv6 - mapped or compatible - nor of a tunnel of 6to4 (2002::/16), of
+        /// Teredo (2001::/32) or of the 6bone (3ffe::/16), as browsers leave them out.
+        /// </summary>
+        internal static bool IsUsableIPv6(IPAddress address)
+        {
+            if (address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6Multicast || address.IsIPv4MappedToIPv6)
+                return false;
+            byte[] bytes = address.GetAddressBytes();
+            if (bytes[0] == 0x20 && bytes[1] == 0x02)
+                return false; // 6to4
+            if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0 && bytes[3] == 0)
+                return false; // Teredo
+            if (bytes[0] == 0x3F && bytes[1] == 0xFE)
+                return false; // 6bone
+            // IPv4-compatible (::a.b.c.d), but not the loopback, ::1
+            bool compatible = true;
+            for (int i = 0; i < 12; i++)
+                compatible &= bytes[i] == 0;
+            return !compatible || IPAddress.IsLoopback(address);
+        }
+
+        // of an address of the system's that says, not deprecated, nor tentative or a duplicate of another's
+        private static bool IsPreferred(UnicastIPAddressInformation unicast)
+        {
+            try
+            {
+                return unicast.DuplicateAddressDetectionState == DuplicateAddressDetectionState.Preferred;
+            }
+            catch (PlatformNotSupportedException)
+            {
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// The addresses of each family intermingled, IPv6 first (RFC 8421 4): of N6 of IPv6 and N4 of IPv4, N6 / N4 - rounded
+        /// up - of IPv6 before each of IPv4, as the candidates' local preferences are to order them; the order within a family as
+        /// it was.
+        /// </summary>
+        internal static List<IPAddress> Intermingle(IReadOnlyList<IPAddress> addresses)
+        {
+            var v6 = addresses.Where(a => a.AddressFamily == AddressFamily.InterNetworkV6).ToList();
+            var v4 = addresses.Where(a => a.AddressFamily == AddressFamily.InterNetwork).ToList();
+            if (v6.Count == 0 || v4.Count == 0)
+                return v6.Concat(v4).ToList();
+            int run = (v6.Count + v4.Count - 1) / v4.Count;
+            var ordered = new List<IPAddress>(addresses.Count);
+            int i6 = 0, i4 = 0;
+            while (i6 < v6.Count || i4 < v4.Count)
+            {
+                for (int k = 0; k < run && i6 < v6.Count; k++)
+                    ordered.Add(v6[i6++]);
+                if (i4 < v4.Count)
+                    ordered.Add(v4[i4++]);
+            }
+            return ordered;
         }
 
         private Socket Bind(IPAddress address)
@@ -407,6 +471,9 @@ namespace SharpICE
             return gathered;
         }
 
+        // the unspecified address of the family, of a related address not to be told
+        private static string NoAddress(AddressFamily family) => family == AddressFamily.InterNetworkV6 ? "::" : "0.0.0.0";
+
         // a host candidate's address: of mDNS candidates, the name it is hidden behind
         private string HostAddress(IPAddress address) => _mdns != null ? _mdns.Register(address) : address.ToString();
 
@@ -432,7 +499,7 @@ namespace SharpICE
             var requests = new List<Task<(LocalBase Base, IPEndPoint Mapped)>>();
             foreach (string server in _options.StunServers)
             {
-                foreach (var local in _bases.Where(b => b.Socket != null && b.EndPoint.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(b.EndPoint.Address)))
+                foreach (var local in _bases.Where(b => b.Socket != null && !IPAddress.IsLoopback(b.EndPoint.Address)))
                     requests.Add(RequestMappedAsync(local, server, cancellationToken));
             }
 
@@ -441,6 +508,9 @@ namespace SharpICE
             foreach (var (local, mapped) in results)
             {
                 if (mapped == null)
+                    continue;
+                // of no NAT, the host candidate again: redundant (RFC 8445 5.1.3)
+                if (mapped.Equals(local.EndPoint))
                     continue;
                 lock (_sync)
                 {
@@ -453,12 +523,13 @@ namespace SharpICE
                     Foundation = "s" + (++index).ToString(CultureInfo.InvariantCulture),
                     Component = IceCandidate.RtpComponent,
                     Transport = "udp",
-                    Priority = IceCandidate.ComputePriority(IceCandidateType.ServerReflexive, 65535 - _bases.IndexOf(local), IceCandidate.RtpComponent),
+                    // of its base's local preference: of the order of RFC 8421 too
+                    Priority = IceCandidate.ComputePriority(IceCandidateType.ServerReflexive, local.Candidate.LocalPreference, IceCandidate.RtpComponent),
                     Address = mapped.Address.ToString(),
                     Port = mapped.Port,
                     Type = IceCandidateType.ServerReflexive,
                     // of mDNS candidates, no address of the host's (draft-ietf-mmusic-mdns-ice-candidates 3.1.2.2)
-                    RelatedAddress = _mdns != null ? "0.0.0.0" : local.EndPoint.Address.ToString(),
+                    RelatedAddress = _mdns != null ? NoAddress(mapped.AddressFamily) : local.EndPoint.Address.ToString(),
                     RelatedPort = _mdns != null ? 0 : local.EndPoint.Port,
                 };
                 lock (_sync)
@@ -480,7 +551,7 @@ namespace SharpICE
             {
                 if (turn == null)
                     continue;
-                foreach (var relayed in turn.RelayedEndPoints)
+                foreach (var relayed in turn.RelayedEndPoints.OrderBy(e => e.AddressFamily == AddressFamily.InterNetworkV6 ? 0 : 1))
                 {
                     var candidate = new IceCandidate
                     {
@@ -492,7 +563,7 @@ namespace SharpICE
                         Port = relayed.Port,
                         Type = IceCandidateType.Relayed,
                         // of mDNS candidates, no address of the host's
-                        RelatedAddress = _mdns != null || turn.MappedEndPoint == null ? "0.0.0.0" : turn.MappedEndPoint.Address.ToString(),
+                        RelatedAddress = _mdns != null || turn.MappedEndPoint == null ? NoAddress(relayed.AddressFamily) : turn.MappedEndPoint.Address.ToString(),
                         RelatedPort = _mdns != null || turn.MappedEndPoint == null ? 0 : turn.MappedEndPoint.Port,
                     };
                     var local = new LocalBase { Turn = turn, EndPoint = relayed, Candidate = candidate };
@@ -529,7 +600,9 @@ namespace SharpICE
                         InitialRetransmissionTimeout = _options.InitialRetransmissionTimeout,
                     };
                     turn = await TurnClient.ConnectAsync(server.Uri, options, timeout.Token).ConfigureAwait(false);
-                    await turn.AllocateAsync(null, timeout.Token).ConfigureAwait(false);
+                    // of IPv6, a relayed address of each family, of a server that allocates them (RFC 8656 7.1); one of RFC 5766
+                    // takes the attribute for one it does not know, and allocates one of IPv4
+                    await turn.AllocateAsync(new TurnAllocateOptions { Dual = _options.IncludeIPv6 }, timeout.Token).ConfigureAwait(false);
                     lock (_sync)
                     {
                         if (_closed)
@@ -1298,7 +1371,10 @@ namespace SharpICE
                 if (response.HasFingerprint && !response.VerifyFingerprint())
                     return;
                 // of an attribute it is not to be understood without, the transaction failed (RFC 8489 6.3.3)
-                gathering.TrySetResult(response.GetUnknownComprehensionRequired().Count > 0 ? null : StunClient.GetMappedAddress(response));
+                // of a server of classic STUN, its retired attributes taken as known (RFC 8489 18.3.1)
+                gathering.TrySetResult(response.GetUnknownComprehensionRequired(t => StunAttributeType.IsKnown(t) || StunAttributeType.IsRetired(t)).Count > 0
+                    ? null
+                    : StunClient.GetMappedAddress(response));
                 return;
             }
 

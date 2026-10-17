@@ -432,6 +432,22 @@ namespace SharpICE.Tests
         }
 
         [TestMethod]
+        public async Task TakesTheResponseOfAServerOfClassicStun()
+        {
+            // SOURCE-ADDRESS and CHANGED-ADDRESS of RFC 3489, as such a server sends them still: retired, not unknown
+            using var server = new FakeServer((request, from) => new StunMessage(request.Method, StunMessageClass.SuccessResponse, request.TransactionId)
+                .AddAddress(from, StunAttributeType.MappedAddress)
+                .AddAddress(new IPEndPoint(IPAddress.Loopback, 3478), 0x0004)
+                .AddAddress(new IPEndPoint(IPAddress.Loopback, 3479), 0x0005)
+                .ToBytes(null, false));
+            using var client = new StunClient(new StunUdpTransport(server.EndPoint), FastOptions());
+
+            var mapped = await client.GetMappedAddressAsync();
+
+            Assert.AreEqual(client.Transport.LocalEndPoint.Port, mapped.Port, "of its MAPPED-ADDRESS");
+        }
+
+        [TestMethod]
         public async Task RetransmitsAsManyTimesAsItIsToThenGivesUp()
         {
             using var server = new FakeServer((request, from) => null);

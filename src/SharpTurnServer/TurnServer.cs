@@ -49,7 +49,10 @@ namespace SharpTurnServer
         /// </summary>
         public IPAddress RelayAddress { get; set; }
 
-        /// <summary>The address of the IPv6 relayed transport addresses; of none, IPv6 relays are not allocated (440).</summary>
+        /// <summary>
+        /// The address of the IPv6 relayed transport addresses; of none, the address of IPv6 a client's 5-tuple is of, of a
+        /// listener of one, else none: IPv6 relays are not allocated then (440).
+        /// </summary>
         public IPAddress RelayAddressV6 { get; set; }
 
         /// <summary>
@@ -460,7 +463,12 @@ namespace SharpTurnServer
         private IPAddress RelayAddressOf(AddressFamily family, StunServerConnection connection)
         {
             if (family == AddressFamily.InterNetworkV6)
-                return _options.RelayAddressV6;
+            {
+                // of none given, of a listener of an address of IPv6 of its own, it
+                var own = connection.LocalEndPoint.Address;
+                return _options.RelayAddressV6
+                    ?? (own.AddressFamily == AddressFamily.InterNetworkV6 && !own.Equals(IPAddress.IPv6Any) && !own.IsIPv6LinkLocal ? own : null);
+            }
             if (_options.RelayAddress != null)
                 return _options.RelayAddress;
             var local = connection.LocalEndPoint.Address;

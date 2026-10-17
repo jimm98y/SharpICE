@@ -33,7 +33,8 @@ namespace SharpICE
     /// <summary>
     /// The names of mDNS - ".local" - a browser hides its addresses behind in its candidates (draft-ietf-mmusic-mdns-ice-
     /// candidates), resolved of a one-shot query of multicast DNS (RFC 6762 5.1) from a port of its own, its answer asked for
-    /// of unicast (5.4): sent from each of the local addresses, as the peer is on the link of one of them.
+    /// of unicast (5.4), and of a query of port 5353, its answer of multicast to the group (5.2), as a responder that answers
+    /// no other - Chrome's - has it: sent from each of the local addresses, as the peer is on the link of one of them.
     /// </summary>
     internal sealed class MdnsResolver
     {
@@ -58,17 +59,27 @@ namespace SharpICE
         public async Task<IPAddress> ResolveAsync(string name, IEnumerable<IPAddress> localAddresses, bool includeIPv6, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             var sockets = new List<Socket>();
+            var groups = new List<(Socket Socket, List<IPAddress> Addresses)>();
             try
             {
-                foreach (var address in localAddresses.Distinct())
+                var addresses = localAddresses.Distinct().Where(a => a.AddressFamily == AddressFamily.InterNetwork || includeIPv6).ToList();
+                foreach (var address in addresses)
                 {
-                    if (address.AddressFamily == AddressFamily.InterNetworkV6 && !includeIPv6)
-                        continue;
                     var socket = Open(address);
                     if (socket != null)
                         sockets.Add(socket);
                 }
-                if (sockets.Count == 0)
+                if (_targets == null)
+                {
+                    foreach (var family in new[] { AddressFamily.InterNetwork, AddressFamily.InterNetworkV6 })
+                    {
+                        var ofFamily = addresses.Where(a => a.AddressFamily == family && !IPAddress.IsLoopback(a)).ToList();
+                        var group = ofFamily.Count > 0 ? OpenGroup(family, ofFamily) : null;
+                        if (group != null)
+                            groups.Add((group, ofFamily));
+                    }
+                }
+                if (sockets.Count == 0 && groups.Count == 0)
                     return null;
 
                 using (var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
@@ -77,7 +88,7 @@ namespace SharpICE
                     var answered = new TaskCompletionSource<IPAddress>(TaskCreationOptions.RunContinuationsAsynchronously);
                     using (cts.Token.Register(() => answered.TrySetResult(null)))
                     {
-                        foreach (var socket in sockets)
+                        foreach (var socket in sockets.Concat(groups.Select(g => g.Socket)))
                             _ = ReceiveAsync(socket, name, answered, cts.Token);
 
                         // the query, and again half a second and a second and a half after it, of one lost
@@ -88,6 +99,8 @@ namespace SharpICE
                                 break;
                             foreach (var socket in sockets)
                                 Query(socket, name);
+                            foreach (var (socket, ofFamily) in groups)
+                                QueryGroup(socket, ofFamily, name);
                         }
                         return await answered.Task.ConfigureAwait(false);
                     }
@@ -99,8 +112,64 @@ namespace SharpICE
             }
             finally
             {
-                foreach (var socket in sockets)
+                foreach (var socket in sockets.Concat(groups.Select(g => g.Socket)))
                     socket.Dispose();
+            }
+        }
+
+        // a socket of port 5353, shared with the system's responder and others, a member of the group on each address: what a
+        // query of it is answered of comes to the group
+        private static Socket OpenGroup(AddressFamily family, List<IPAddress> addresses)
+        {
+            var socket = new Socket(family, SocketType.Dgram, ProtocolType.Udp);
+            try
+            {
+                bool v4 = family == AddressFamily.InterNetwork;
+                socket.ExclusiveAddressUse = false;
+                socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                socket.Bind(new IPEndPoint(v4 ? IPAddress.Any : IPAddress.IPv6Any, Port));
+                foreach (var address in addresses)
+                {
+                    try
+                    {
+                        if (v4)
+                            socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership, new MulticastOption(GroupV4, address));
+                        else
+                            socket.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.AddMembership, new IPv6MulticastOption(GroupV6, InterfaceIndex(address)));
+                    }
+                    catch (SocketException)
+                    {
+                        // a membership of the interface already, or none to be had
+                    }
+                }
+                socket.SetSocketOption(v4 ? SocketOptionLevel.IP : SocketOptionLevel.IPv6, SocketOptionName.MulticastTimeToLive, 255);
+                return socket;
+            }
+            catch (SocketException)
+            {
+                socket.Dispose();
+                return null;
+            }
+        }
+
+        // a query of its answer of multicast (the QU bit clear), out of each interface of the family
+        private static void QueryGroup(Socket socket, List<IPAddress> addresses, string name)
+        {
+            bool v4 = socket.AddressFamily == AddressFamily.InterNetwork;
+            byte[] query = DnsMessage.BuildQuery(0, name, v4 ? DnsMessage.TypeA : DnsMessage.TypeAaaa, DnsMessage.ClassIn, false);
+            foreach (var address in addresses)
+            {
+                try
+                {
+                    if (v4)
+                        socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface, address.GetAddressBytes());
+                    else
+                        socket.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.MulticastInterface, (int)InterfaceIndex(address));
+                    socket.SendTo(query, new IPEndPoint(v4 ? GroupV4 : GroupV6, Port));
+                }
+                catch (SocketException)
+                {
+                }
             }
         }
 

@@ -103,6 +103,13 @@ namespace SharpStunClient
 
         /// <summary>Whether the attribute is one of these, which this library reads.</summary>
         public static bool IsKnown(ushort type) => Known.Contains(type);
+
+        /// <summary>
+        /// Whether the attribute is one of RFC 3489's that RFC 5389 retired (RFC 8489 18.3.1): RESPONSE-ADDRESS, CHANGE-REQUEST,
+        /// SOURCE-ADDRESS, CHANGED-ADDRESS, PASSWORD, REFLECTED-FROM. A server of classic STUN puts SOURCE-ADDRESS and
+        /// CHANGED-ADDRESS in its responses still: of a client, of no meaning to it, they fail no transaction.
+        /// </summary>
+        public static bool IsRetired(ushort type) => type == 0x0002 || type == 0x0003 || type == 0x0004 || type == 0x0005 || type == 0x0007 || type == 0x000B;
     }
 
     /// <summary>

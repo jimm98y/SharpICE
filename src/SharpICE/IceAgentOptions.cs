@@ -68,7 +68,7 @@ namespace SharpICE
         public System.Net.Security.RemoteCertificateValidationCallback TurnCertificateValidation { get; set; }
 
         /// <summary>Whether to gather candidates of IPv6 addresses too, link-local ones left out.</summary>
-        public bool IncludeIPv6 { get; set; } = false;
+        public bool IncludeIPv6 { get; set; } = true;
 
         /// <summary>
         /// Whether to gather candidates of the loopback addresses: always where there is no other address, else only if set -

@@ -259,7 +259,8 @@ namespace SharpStunClient
                     return null;
                 }
 
-                var unknown = response.GetUnknownComprehensionRequired();
+                // of a server of classic STUN, its retired attributes taken as known (RFC 8489 18.3.1)
+                var unknown = response.GetUnknownComprehensionRequired(t => StunAttributeType.IsKnown(t) || StunAttributeType.IsRetired(t));
                 if (unknown.Count > 0)
                     throw new StunException($"The response is of attributes it is not to be understood without: {string.Join(", ", unknown.Select(t => "0x" + t.ToString("X4")))}.", response);
 
