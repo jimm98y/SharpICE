@@ -67,7 +67,7 @@ namespace SharpICE
                     Component = IceCandidate.RtpComponent,
                     Transport = "tcp",
                     Priority = IceCandidate.ComputePriority(IceCandidateType.Host, IceCandidate.TcpLocalPreference(IceCandidate.TcpPassive, 8191 - i), IceCandidate.RtpComponent, true),
-                    Address = endPoint.Address.ToString(),
+                    Address = HostAddress(endPoint.Address),
                     Port = endPoint.Port,
                     Type = IceCandidateType.Host,
                 };
@@ -78,7 +78,7 @@ namespace SharpICE
                     Component = IceCandidate.RtpComponent,
                     Transport = "tcp",
                     Priority = IceCandidate.ComputePriority(IceCandidateType.Host, IceCandidate.TcpLocalPreference(IceCandidate.TcpActive, 8191 - i), IceCandidate.RtpComponent, true),
-                    Address = endPoint.Address.ToString(),
+                    Address = HostAddress(endPoint.Address),
                     Port = ActivePort,
                     Type = IceCandidateType.Host,
                 };

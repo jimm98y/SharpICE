@@ -1,0 +1,638 @@
+﻿// SharpStunServer
+// Copyright (C) 2026 Lukas Volf
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.Tls;
+using Org.BouncyCastle.Tls.Crypto.Impl.BC;
+using SharpStunClient;
+using System;
+using System.Buffers.Binary;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace SharpStunServer
+{
+    public sealed class StunServerOptions
+    {
+        /// <summary>
+        /// The realm of long-term credentials (RFC 8489 9.2): of one, a request is answered only of a user's credentials, its
+        /// first challenged with a 401; of none, every request is answered as it is.
+        /// </summary>
+        public string Realm { get; set; }
+
+        /// <summary>The users of the long-term credentials, and their passwords.</summary>
+        public IDictionary<string, string> Users { get; set; } = new Dictionary<string, string>();
+
+        /// <summary>
+        /// The password algorithms to offer (RFC 8489 9.2.4), in the order of preference, of the nonce cookie's "Password
+        /// algorithms" feature: of any, a request signed of MESSAGE-INTEGRITY-SHA256; of none, of MD5 and MESSAGE-INTEGRITY alone,
+        /// as a server of RFC 5389.
+        /// </summary>
+        public IList<StunPasswordAlgorithm> PasswordAlgorithms { get; set; } = new List<StunPasswordAlgorithm> { StunPasswordAlgorithm.Sha256, StunPasswordAlgorithm.Md5 };
+
+        /// <summary>Whether a USERHASH is taken in place of a USERNAME: the nonce cookie's "Username anonymity" feature.</summary>
+        public bool UsernameAnonymity { get; set; }
+
+        /// <summary>How long a nonce is good for: after it, a request of it is answered 438 (Stale Nonce), of a new one.</summary>
+        public TimeSpan NonceLifetime { get; set; } = TimeSpan.FromMinutes(10);
+
+        /// <summary>
+        /// The server a request is redirected to of a 300 (Try Alternate) (RFC 8489 10), of the request's source: null, of none
+        /// to redirect to, which answers it here.
+        /// </summary>
+        public Func<IPEndPoint, IPEndPoint> AlternateServer { get; set; }
+
+        /// <summary>The name of the certificate of the alternate server, of a redirection over TLS (RFC 8489 14.16).</summary>
+        public string AlternateDomain { get; set; }
+
+        /// <summary>The certificate of TLS and DTLS, its private key with it: of DTLS, an exportable one.</summary>
+        public X509Certificate2 Certificate { get; set; }
+
+        /// <summary>How long an association of DTLS is kept of no datagram of its peer.</summary>
+        public TimeSpan DtlsIdleTimeout { get; set; } = TimeSpan.FromMinutes(1);
+
+        /// <summary>The SOFTWARE of its responses; none, of null.</summary>
+        public string Software { get; set; } = "SharpStunServer";
+
+        /// <summary>What it does, a line at a time, of anything given.</summary>
+        public Action<string> Trace { get; set; }
+    }
+
+    /// <summary>
+    /// A STUN server (RFC 8489) of the Binding method: over UDP, TCP, TLS over TCP, and DTLS over UDP, each listener of its own. It answers a
+    /// request with the address it came from, of long-term credentials if a realm is given - its nonces of the nonce cookie,
+    /// and of the source address - or redirects it to an alternate server; a request of an attribute it is not to be understood
+    /// without is answered 420. <see cref="Process"/> answers a message of a transport of the caller's.
+    /// </summary>
+    /// <remarks>
+    /// Its nonces are stateless: the time each was made and an HMAC of it and the request's source, of a key of the server's
+    /// own, which no other server and no other source has (RFC 8489 9.2.4). Classic STUN of RFC 3489, of no magic cookie, is not
+    /// answered.
+    /// </remarks>
+    public sealed class StunServer : IDisposable
+    {
+        private readonly StunServerOptions _options;
+        private readonly byte[] _nonceKey = new byte[32];
+        private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+        private readonly List<Socket> _udp = new List<Socket>();
+        private readonly List<TcpListener> _tcp = new List<TcpListener>();
+        private readonly object _sync = new object();
+
+        public StunServer(StunServerOptions options = null)
+        {
+            _options = options ?? new StunServerOptions();
+            using (var random = RandomNumberGenerator.Create())
+                random.GetBytes(_nonceKey);
+        }
+
+        private void Trace(string message) => _options.Trace?.Invoke(message);
+
+        #region Listeners
+
+        /// <summary>Answers the requests of UDP of the address, of port 3478 if none is given (0, any port); the address bound.</summary>
+        public IPEndPoint ListenUdp(IPEndPoint endPoint)
+        {
+            var socket = new Socket(endPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            try
+            {
+                socket.Bind(endPoint);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+            lock (_sync)
+                _udp.Add(socket);
+            _ = ServeUdpAsync(socket);
+            var bound = (IPEndPoint)socket.LocalEndPoint;
+            Trace($"UDP on {bound}");
+            return bound;
+        }
+
+        /// <summary>Answers the requests of TCP of the address; the address bound.</summary>
+        public IPEndPoint ListenTcp(IPEndPoint endPoint) => Listen(endPoint, false);
+
+        /// <summary>Answers the requests of TLS over TCP of the address, of the certificate of the options; the address bound.</summary>
+        public IPEndPoint ListenTls(IPEndPoint endPoint)
+        {
+            if (_options.Certificate == null)
+                throw new InvalidOperationException("TLS takes a certificate: see StunServerOptions.Certificate.");
+            return Listen(endPoint, true);
+        }
+
+        /// <summary>
+        /// Answers the requests of DTLS over UDP of the address (RFC 8489 6.2.3), of the certificate of the options - its private
+        /// key exportable - an association of each peer, of a cookie exchange first (RFC 6347 4.2.1), so that a source forged
+        /// makes none; the address bound.
+        /// </summary>
+        public IPEndPoint ListenDtls(IPEndPoint endPoint)
+        {
+            if (_options.Certificate == null)
+                throw new InvalidOperationException("DTLS takes a certificate: see StunServerOptions.Certificate.");
+            var crypto = new BcTlsCrypto(new SecureRandom());
+            var credentials = DtlsCertificates.Load(crypto, _options.Certificate);
+
+            var socket = new Socket(endPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            try
+            {
+                socket.Bind(endPoint);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+            lock (_sync)
+                _udp.Add(socket);
+            _ = ServeDtlsAsync(socket, crypto, credentials);
+            var bound = (IPEndPoint)socket.LocalEndPoint;
+            Trace($"DTLS on {bound}");
+            return bound;
+        }
+
+        private async Task ServeDtlsAsync(Socket socket, BcTlsCrypto crypto, DtlsCredentials credentials)
+        {
+            var verifier = new DtlsVerifier(crypto);
+            var peers = new ConcurrentDictionary<string, QueuedDatagramTransport>();
+            byte[] buffer = new byte[65536];
+            var any = new IPEndPoint(socket.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+            while (!_cts.IsCancellationRequested)
+            {
+                SocketReceiveFromResult result;
+                try
+                {
+                    result = await socket.ReceiveFromAsync(new ArraySegment<byte>(buffer), SocketFlags.None, any).ConfigureAwait(false);
+                }
+                catch (SocketException)
+                {
+                    continue;
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+
+                var from = (IPEndPoint)result.RemoteEndPoint;
+                string id = from.ToString();
+                byte[] datagram = new byte[result.ReceivedBytes];
+                Buffer.BlockCopy(buffer, 0, datagram, 0, datagram.Length);
+                if (peers.TryGetValue(id, out var peer))
+                {
+                    peer.Enqueue(datagram);
+                    continue;
+                }
+
+                // a peer of no association: its ClientHello of the verifier's cookie, else a HelloVerifyRequest of one back
+                DtlsRequest request;
+                try
+                {
+                    request = verifier.VerifyRequest(Encoding.UTF8.GetBytes(id), datagram, 0, datagram.Length, new QueuedDatagramTransport(socket, from));
+                }
+                catch (Exception ex) when (ex is IOException || ex is SocketException || ex is TlsException)
+                {
+                    Trace($"ClientHello of {from} refused: {ex.Message}");
+                    continue;
+                }
+                if (request == null)
+                    continue;
+                peer = new QueuedDatagramTransport(socket, from);
+                if (!peers.TryAdd(id, peer))
+                    continue;
+                var thread = new Thread(() => ServeDtlsPeer(peer, request, from, crypto, credentials, peers, id)) { IsBackground = true, Name = "STUN over DTLS " + id };
+                thread.Start();
+            }
+            foreach (var peer in peers.Values)
+                peer.Close();
+        }
+
+        private void ServeDtlsPeer(QueuedDatagramTransport peer, DtlsRequest request, IPEndPoint from, BcTlsCrypto crypto, DtlsCredentials credentials, ConcurrentDictionary<string, QueuedDatagramTransport> peers, string id)
+        {
+            DtlsTransport dtls = null;
+            try
+            {
+                dtls = new DtlsServerProtocol().Accept(new DtlsStunServer(crypto, credentials, 10000), peer, request);
+                Trace($"DTLS of {from}");
+                byte[] buffer = new byte[65536];
+                while (!_cts.IsCancellationRequested)
+                {
+                    int count = dtls.Receive(buffer, 0, buffer.Length, 1000);
+                    if (count < 0)
+                    {
+                        if (DateTime.UtcNow - peer.LastReceived > _options.DtlsIdleTimeout)
+                            break;
+                        continue;
+                    }
+                    byte[] response = Process(buffer, 0, count, from, true);
+                    if (response != null)
+                        dtls.Send(response, 0, response.Length);
+                }
+            }
+            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is TlsException || ex is ObjectDisposedException)
+            {
+                Trace($"DTLS of {from} ended: {ex.Message}");
+            }
+            finally
+            {
+                try
+                {
+                    dtls?.Close();
+                }
+                catch (Exception ex) when (ex is IOException || ex is SocketException || ex is TlsException || ex is ObjectDisposedException)
+                {
+                }
+                peers.TryRemove(id, out _);
+                peer.Close();
+            }
+        }
+
+        private IPEndPoint Listen(IPEndPoint endPoint, bool tls)
+        {
+            var listener = new TcpListener(endPoint);
+            listener.Start();
+            lock (_sync)
+                _tcp.Add(listener);
+            _ = AcceptAsync(listener, tls);
+            var bound = (IPEndPoint)listener.LocalEndpoint;
+            Trace($"{(tls ? "TLS" : "TCP")} on {bound}");
+            return bound;
+        }
+
+        private async Task ServeUdpAsync(Socket socket)
+        {
+            byte[] buffer = new byte[65536];
+            var any = new IPEndPoint(socket.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+            while (!_cts.IsCancellationRequested)
+            {
+                SocketReceiveFromResult result;
+                try
+                {
+                    result = await socket.ReceiveFromAsync(new ArraySegment<byte>(buffer), SocketFlags.None, any).ConfigureAwait(false);
+                }
+                catch (SocketException)
+                {
+                    // an ICMP port unreachable of a response before, reported by Windows as a reset
+                    continue;
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+
+                try
+                {
+                    byte[] response = Process(buffer, 0, result.ReceivedBytes, (IPEndPoint)result.RemoteEndPoint, false);
+                    if (response != null)
+                        socket.SendTo(response, result.RemoteEndPoint);
+                }
+                catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
+                {
+                }
+            }
+        }
+
+        private async Task AcceptAsync(TcpListener listener, bool tls)
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                TcpClient client;
+                try
+                {
+                    client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is ObjectDisposedException || ex is InvalidOperationException)
+                {
+                    return;
+                }
+                catch (SocketException)
+                {
+                    continue;
+                }
+                _ = ServeStreamAsync(client, tls);
+            }
+        }
+
+        // a connection of STUN alone, each message of its own length (RFC 8489 6.2.2), answered over it
+        private async Task ServeStreamAsync(TcpClient client, bool tls)
+        {
+            using (client)
+            {
+                var from = (IPEndPoint)client.Client.RemoteEndPoint;
+                try
+                {
+                    Stream stream = client.GetStream();
+                    if (tls)
+                    {
+                        var ssl = new SslStream(stream, false);
+                        await ssl.AuthenticateAsServerAsync(_options.Certificate, false, SslProtocols.None, false).ConfigureAwait(false);
+                        stream = ssl;
+                    }
+                    using (stream)
+                    {
+                        byte[] header = new byte[StunMessage.HeaderLength];
+                        while (!_cts.IsCancellationRequested)
+                        {
+                            if (!await ReadAsync(stream, header, 0, header.Length).ConfigureAwait(false))
+                                return;
+                            if ((header[0] & 0xC0) != 0 || BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(4)) != StunMessage.MagicCookie)
+                                return;
+                            int length = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
+                            byte[] message = new byte[header.Length + length];
+                            Buffer.BlockCopy(header, 0, message, 0, header.Length);
+                            if (!await ReadAsync(stream, message, header.Length, length).ConfigureAwait(false))
+                                return;
+
+                            byte[] response = Process(message, 0, message.Length, from, tls);
+                            if (response != null)
+                                await stream.WriteAsync(response, 0, response.Length).ConfigureAwait(false);
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is IOException || ex is SocketException || ex is AuthenticationException || ex is ObjectDisposedException)
+                {
+                    Trace($"Connection of {from} ended: {ex.Message}");
+                }
+            }
+        }
+
+        private static async Task<bool> ReadAsync(Stream stream, byte[] buffer, int offset, int count)
+        {
+            while (count > 0)
+            {
+                int read = await stream.ReadAsync(buffer, offset, count).ConfigureAwait(false);
+                if (read == 0)
+                    return false;
+                offset += read;
+                count -= read;
+            }
+            return true;
+        }
+
+        #endregion // Listeners
+
+        #region Processing
+
+        /// <summary>
+        /// The answer to a message from the address given, over a transport of TLS (or DTLS) or not: the response's bytes, or
+        /// null of none - of what is not a STUN request it answers, which is discarded (RFC 8489 6.3).
+        /// </summary>
+        public byte[] Process(byte[] buffer, int offset, int count, IPEndPoint from, bool secure)
+        {
+            var request = StunMessage.Parse(buffer, offset, count);
+            if (request == null || request.HasFingerprint && !request.VerifyFingerprint())
+                return null;
+            // an indication of Binding asks for nothing; a response is of no transaction of a server's; another method is not one
+            // it supports
+            if (request.Class != StunMessageClass.Request || request.Method != StunMethod.Binding)
+                return null;
+            from = Normalize(from);
+
+            byte[] key = null;
+            var integrity = StunIntegrity.None;
+            if (_options.Realm != null)
+            {
+                var error = Authenticate(request, from, out key, out integrity);
+                if (error != null)
+                    return Finish(error, request, null, StunIntegrity.None);
+            }
+
+            // of an attribute it is not to be understood without, a 420 that lists them (RFC 8489 6.3.1)
+            var unknown = request.GetUnknownComprehensionRequired();
+            if (unknown.Count > 0)
+            {
+                var error = Error(request, StunErrorCode.UnknownAttribute, "Unknown Attribute").AddUnknownAttributes(unknown);
+                return Finish(error, request, key, integrity);
+            }
+
+            var alternate = _options.AlternateServer?.Invoke(from);
+            if (alternate != null)
+            {
+                // of the request's address family (RFC 8489 10); its certificate's name, of a request of TLS of SHA-256
+                if (alternate.AddressFamily == from.AddressFamily)
+                {
+                    var redirect = Error(request, StunErrorCode.TryAlternate, "Try Alternate").AddAddress(alternate, StunAttributeType.AlternateServer);
+                    if (secure && integrity == StunIntegrity.Sha256 && _options.AlternateDomain != null)
+                        redirect.AddString(StunAttributeType.AlternateDomain, _options.AlternateDomain);
+                    Trace($"Redirected {from} to {alternate}");
+                    return Finish(redirect, request, key, integrity);
+                }
+            }
+
+            var response = new StunMessage(request.Method, StunMessageClass.SuccessResponse, request.TransactionId).AddXorAddress(from);
+            return Finish(response, request, key, integrity);
+        }
+
+        private static StunMessage Error(StunMessage request, int code, string reason)
+            => new StunMessage(request.Method, StunMessageClass.ErrorResponse, request.TransactionId).AddError(code, reason);
+
+        // its SOFTWARE, its integrity of the request's, and a FINGERPRINT, of a request of one
+        private byte[] Finish(StunMessage response, StunMessage request, byte[] key, StunIntegrity integrity)
+        {
+            if (_options.Software != null)
+                response.AddString(StunAttributeType.Software, _options.Software);
+            return response.ToBytes(key, integrity, request.HasFingerprint);
+        }
+
+        private static IPEndPoint Normalize(IPEndPoint endPoint)
+            => endPoint.Address.IsIPv4MappedToIPv6 ? new IPEndPoint(endPoint.Address.MapToIPv4(), endPoint.Port) : endPoint;
+
+        #endregion // Processing
+
+        #region Credentials
+
+        private StunSecurityFeatures Features
+            => (_options.PasswordAlgorithms.Count > 0 ? StunSecurityFeatures.PasswordAlgorithms : StunSecurityFeatures.None)
+               | (_options.UsernameAnonymity ? StunSecurityFeatures.UsernameAnonymity : StunSecurityFeatures.None);
+
+        // the server's checks of long-term credentials (RFC 8489 9.2.4), in their order: the error response, or null of a request
+        // authenticated, of the key and the integrity its response is signed of
+        private StunMessage Authenticate(StunMessage request, IPEndPoint from, out byte[] key, out StunIntegrity integrity)
+        {
+            key = null;
+            integrity = StunIntegrity.None;
+            if (!request.HasIntegrity && !request.HasIntegritySha256)
+                return Challenge(request, from, StunErrorCode.Unauthorized, "Unauthenticated");
+
+            string nonce = request.Nonce;
+            string realm = request.Realm;
+            var userhash = request.GetAttribute(StunAttributeType.Userhash);
+            string username = request.Username;
+            if (username == null && userhash == null || realm == null || nonce == null)
+                return Error(request, StunErrorCode.BadRequest, "Bad Request");
+
+            // of the nonce cookie of "Password algorithms": both attributes, the list as it was sent, and one of it; else MD5,
+            // of neither
+            var algorithm = StunPasswordAlgorithm.Md5;
+            bool listed = false;
+            var features = StunCredentials.GetSecurityFeatures(nonce);
+            if (features.HasValue && (features.Value & StunSecurityFeatures.PasswordAlgorithms) != 0)
+            {
+                var list = request.GetAttribute(StunAttributeType.PasswordAlgorithms);
+                ushort? chosen = request.PasswordAlgorithm;
+                if (list != null || chosen.HasValue)
+                {
+                    if (list == null || !chosen.HasValue || !list.Value.SequenceEqual(PasswordAlgorithmsValue())
+                        || !_options.PasswordAlgorithms.Any(a => (ushort)a == chosen.Value))
+                        return Error(request, StunErrorCode.BadRequest, "Bad Request");
+                    algorithm = (StunPasswordAlgorithm)chosen.Value;
+                    listed = true;
+                }
+            }
+
+            // the user, of its name, or of its hash
+            string password = null;
+            if (realm == _options.Realm)
+            {
+                if (username != null && _options.Users.TryGetValue(username, out string found))
+                {
+                    password = found;
+                }
+                else if (userhash != null && _options.UsernameAnonymity)
+                {
+                    foreach (var user in _options.Users)
+                    {
+                        if (StunCredentials.UserHash(user.Key, realm).SequenceEqual(userhash.Value))
+                        {
+                            username = user.Key;
+                            password = user.Value;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (password == null)
+                return Challenge(request, from, StunErrorCode.Unauthorized, "Unauthenticated");
+
+            byte[] candidate = StunCredentials.LongTermKey(username, realm, password, algorithm);
+            bool valid = request.HasIntegritySha256 ? request.VerifyIntegritySha256(candidate) : request.VerifyIntegrity(candidate);
+            if (!valid)
+                return Challenge(request, from, StunErrorCode.Unauthorized, "Unauthenticated");
+            if (!IsNonceValid(nonce, from))
+                return Challenge(request, from, StunErrorCode.StaleNonce, "Stale Nonce");
+
+            // MESSAGE-INTEGRITY-SHA256, unless the request was of MD5 as of no algorithm listed, of MESSAGE-INTEGRITY then
+            key = candidate;
+            integrity = listed || request.HasIntegritySha256 ? StunIntegrity.Sha256 : StunIntegrity.Sha1;
+            return null;
+        }
+
+        private StunMessage Challenge(StunMessage request, IPEndPoint from, int code, string reason)
+        {
+            var error = Error(request, code, reason)
+                .AddString(StunAttributeType.Realm, _options.Realm)
+                .AddString(StunAttributeType.Nonce, CreateNonce(from));
+            if (_options.PasswordAlgorithms.Count > 0)
+                error.AddAttribute(StunAttributeType.PasswordAlgorithms, PasswordAlgorithmsValue());
+            return error;
+        }
+
+        private byte[] PasswordAlgorithmsValue()
+        {
+            byte[] value = new byte[4 * _options.PasswordAlgorithms.Count];
+            for (int i = 0; i < _options.PasswordAlgorithms.Count; i++)
+                BinaryPrimitives.WriteUInt16BigEndian(value.AsSpan(4 * i), (ushort)_options.PasswordAlgorithms[i]);
+            return value;
+        }
+
+        // the nonce cookie, then the time the nonce was made and its HMAC of the source (RFC 8489 9.2.4: no two sources of one)
+        private string CreateNonce(IPEndPoint from)
+        {
+            long now = DateTime.UtcNow.Ticks;
+            byte[] time = new byte[8];
+            BinaryPrimitives.WriteInt64BigEndian(time, now);
+            return StunCredentials.CreateNonce(Features, ToBase64Url(time) + "." + ToBase64Url(Sign(time, from)));
+        }
+
+        private bool IsNonceValid(string nonce, IPEndPoint from)
+        {
+            if (!nonce.StartsWith(StunCredentials.NonceCookie, StringComparison.Ordinal) || nonce.Length < StunCredentials.NonceCookie.Length + 4)
+                return false;
+            // of the features of now: a nonce of others is of another configuration, and stale
+            if (StunCredentials.GetSecurityFeatures(nonce) != Features)
+                return false;
+            string[] parts = nonce.Substring(StunCredentials.NonceCookie.Length + 4).Split('.');
+            if (parts.Length != 2)
+                return false;
+            byte[] time = FromBase64Url(parts[0]);
+            byte[] signature = FromBase64Url(parts[1]);
+            if (time == null || signature == null || time.Length != 8)
+                return false;
+            byte[] expected = Sign(time, from);
+            int difference = expected.Length ^ signature.Length;
+            for (int i = 0; i < Math.Min(expected.Length, signature.Length); i++)
+                difference |= expected[i] ^ signature[i];
+            if (difference != 0)
+                return false;
+            var made = new DateTime(BinaryPrimitives.ReadInt64BigEndian(time), DateTimeKind.Utc);
+            return DateTime.UtcNow - made <= _options.NonceLifetime;
+        }
+
+        private byte[] Sign(byte[] time, IPEndPoint from)
+        {
+            byte[] source = Encoding.UTF8.GetBytes(from.ToString());
+            using (var hmac = new HMACSHA256(_nonceKey))
+                return hmac.ComputeHash(time.Concat(source).ToArray()).Take(16).ToArray();
+        }
+
+        private static string ToBase64Url(byte[] bytes) => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+        private static byte[] FromBase64Url(string text)
+        {
+            string base64 = text.Replace('-', '+').Replace('_', '/');
+            base64 += new string('=', (4 - base64.Length % 4) % 4);
+            try
+            {
+                return Convert.FromBase64String(base64);
+            }
+            catch (FormatException)
+            {
+                return null;
+            }
+        }
+
+        #endregion // Credentials
+
+        public void Dispose()
+        {
+            _cts.Cancel();
+            lock (_sync)
+            {
+                foreach (var socket in _udp)
+                    socket.Dispose();
+                foreach (var listener in _tcp)
+                    listener.Stop();
+                _udp.Clear();
+                _tcp.Clear();
+            }
+        }
+    }
+}

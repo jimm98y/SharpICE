@@ -56,8 +56,14 @@ namespace SharpStunClient
         /// <summary>How long to wait for a DNS server's answer to an SRV query.</summary>
         public TimeSpan DnsTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
-        /// <summary>Checks a TLS server's certificate in place of the system's checks; of none, the system's.</summary>
+        /// <summary>Checks a TLS or DTLS server's certificate in place of the system's checks; of none, the system's.</summary>
         public RemoteCertificateValidationCallback CertificateValidation { get; set; }
+
+        /// <summary>
+        /// Whether a "stuns" URI is of DTLS over UDP (RFC 8489 6.2.3), its SRV records "_stuns._udp", rather than of TLS over TCP;
+        /// a "turns" URI says which of its "?transport=".
+        /// </summary>
+        public bool UseDtls { get; set; }
     }
 
     /// <summary>A transaction that failed otherwise than of no answer, or of an error response: what failed, and the response of it.</summary>
@@ -72,8 +78,8 @@ namespace SharpStunClient
     }
 
     /// <summary>
-    /// A STUN client (RFC 8489): request/response transactions with a server over a <see cref="StunTransport"/> - UDP, TCP or
-    /// TLS - retransmitted over UDP, of long-term credentials when the server asks for them, and redirected by its
+    /// A STUN client (RFC 8489): request/response transactions with a server over a <see cref="StunTransport"/> - UDP, TCP,
+    /// TLS or DTLS - retransmitted over UDP and DTLS, of long-term credentials when the server asks for them, and redirected by its
     /// ALTERNATE-SERVER. Its static methods are of the Binding method alone: the address a NAT maps a socket to.
     /// </summary>
     /// <remarks>
@@ -148,32 +154,35 @@ namespace SharpStunClient
         /// A client of a server of a STUN or TURN URI (RFC 7064, RFC 7065): of an IP address, it; of a host name and a port,
         /// its addresses; of a host name alone, its SRV records' (RFC 8489 8.1), else its addresses of the default port. Over
         /// UDP, of the first address, the others tried once it does not answer; over TCP and TLS, connected to the first
-        /// that takes a connection. A "stuns" URI is of a host name, its certificate checked of it; DTLS is not done.
+        /// that takes a connection, or of DTLS, an association. A "stuns" URI is of a host name, its certificate checked of it;
+        /// of TLS, or of DTLS, of <see cref="StunClientOptions.UseDtls"/>.
         /// </summary>
         /// <exception cref="StunException">Of no address, or of none that takes a connection.</exception>
         public static async Task<StunClient> ConnectAsync(string uri, StunClientOptions options = null, CancellationToken cancellationToken = default)
         {
             options ??= new StunClientOptions();
             var parsed = StunUri.Parse(uri);
-            if (parsed.IsSecure && parsed.TransportProtocol == "udp")
-                throw new NotSupportedException($"Of {uri}: DTLS is not done.");
             if (parsed.IsSecure && parsed.Address != null)
                 throw new StunException($"Of {uri}: a secure URI is of a host name, which the server's certificate is checked of (RFC 8489 8.1).");
+            string protocol = parsed.IsSecure && parsed.Transport == null && options.UseDtls ? "udp" : parsed.TransportProtocol;
 
-            var servers = await ResolveAllAsync(parsed, options.DnsTimeout, cancellationToken).ConfigureAwait(false);
+            var servers = await ResolveAllAsync(parsed, options.DnsTimeout, cancellationToken, protocol).ConfigureAwait(false);
             if (servers.Count == 0)
                 throw new StunException($"{uri} resolves to no address.");
 
-            if (parsed.TransportProtocol == "udp")
+            if (protocol == "udp" && !parsed.IsSecure)
                 return new StunClient(new StunUdpTransport(servers[0]), options, true, servers.Skip(1).ToList(), null);
 
             string tlsHost = parsed.IsSecure ? parsed.Host : null;
+            bool dtls = protocol == "udp";
             Exception last = null;
             for (int i = 0; i < servers.Count; i++)
             {
                 try
                 {
-                    var transport = await StunStreamTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, cancellationToken).ConfigureAwait(false);
+                    StunTransport transport = dtls
+                        ? await StunDtlsTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, cancellationToken).ConfigureAwait(false)
+                        : await StunStreamTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, cancellationToken).ConfigureAwait(false);
                     return new StunClient(transport, options, true, servers.Skip(i + 1).ToList(), tlsHost);
                 }
                 catch (Exception e) when (IsConnectionFailure(e))
@@ -552,8 +561,8 @@ namespace SharpStunClient
                 StunTransport transport;
                 try
                 {
-                    transport = _transport is StunUdpTransport
-                        ? new StunUdpTransport(server)
+                    transport = _transport is StunUdpTransport ? new StunUdpTransport(server)
+                        : _transport is StunDtlsTransport ? await StunDtlsTransport.ConnectAsync(server, _tlsHost, _options.CertificateValidation, cancellationToken).ConfigureAwait(false)
                         : await StunStreamTransport.ConnectAsync(server, _tlsHost, _options.CertificateValidation, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception e) when (IsConnectionFailure(e))
@@ -582,9 +591,10 @@ namespace SharpStunClient
         /// <summary>
         /// The endpoints of a server's URI, in the order to try them: of an IP address, it; of a host name and a port, its
         /// addresses; of a host name alone, those of its SRV records (RFC 8489 8.1) - "_stun._udp", "_stuns._tcp", "_turn._tcp"
-        /// and so on - else its addresses of the default port. Both IPv4 and IPv6 ones, as a dual-stack client is to try.
+        /// and so on - else its addresses of the default port. Both IPv4 and IPv6 ones, as a dual-stack client is to try. Of a
+        /// transport given, of its SRV records rather than the URI's: "udp" of a "stuns" URI, of DTLS.
         /// </summary>
-        public static async Task<List<IPEndPoint>> ResolveAllAsync(StunUri uri, TimeSpan dnsTimeout, CancellationToken cancellationToken = default)
+        public static async Task<List<IPEndPoint>> ResolveAllAsync(StunUri uri, TimeSpan dnsTimeout, CancellationToken cancellationToken = default, string transportProtocol = null)
         {
             var address = uri.Address;
             if (address != null)
@@ -592,7 +602,7 @@ namespace SharpStunClient
 
             if (!uri.Port.HasValue)
             {
-                var records = await DnsSrv.QueryAsync($"_{uri.Scheme}._{uri.TransportProtocol}.{uri.Host}", dnsTimeout, cancellationToken).ConfigureAwait(false);
+                var records = await DnsSrv.QueryAsync($"_{uri.Scheme}._{transportProtocol ?? uri.TransportProtocol}.{uri.Host}", dnsTimeout, cancellationToken).ConfigureAwait(false);
                 var endPoints = new List<IPEndPoint>();
                 foreach (var record in records)
                 {

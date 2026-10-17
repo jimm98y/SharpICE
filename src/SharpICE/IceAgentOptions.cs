@@ -81,6 +81,14 @@ namespace SharpICE
         /// <summary>How long to wait for the answer to an mDNS query.</summary>
         public TimeSpan MdnsTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
+        /// <summary>
+        /// Whether to hide the local addresses behind names of mDNS, as browsers do (draft-ietf-mmusic-mdns-ice-candidates): each
+        /// host candidate of a random "&lt;uuid&gt;.local" rather than its address, which the agent answers queries of multicast
+        /// DNS of; a server reflexive one of "raddr 0.0.0.0 rport 0". A peer on another link resolves none of them, and learns
+        /// a peer reflexive candidate of the agent's checks instead.
+        /// </summary>
+        public bool MdnsCandidates { get; set; } = false;
+
         /// <summary>The ports its sockets are bound to; any the system gives, of 0.</summary>
         public int PortMin { get; set; } = 0;
         public int PortMax { get; set; } = 0;

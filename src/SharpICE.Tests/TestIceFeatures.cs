@@ -304,6 +304,30 @@ namespace SharpICE.Tests
         }
 
         [TestMethod]
+        public async Task HidesItsAddressBehindAnMdnsName()
+        {
+            var options = Loopback();
+            options.MdnsCandidates = true;
+            using var hiding = new IceAgent(options) { MdnsResponderEndPoint = new IPEndPoint(IPAddress.Loopback, 0) };
+            using var resolving = new IceAgent(Loopback(IceRole.Controlling));
+            await hiding.GatherCandidatesAsync();
+            resolving.Mdns = new MdnsResolver(new[] { hiding.MdnsResponder.EndPoint });
+
+            // of no address of its own: a name of a UUID, and ".local"
+            var candidate = hiding.LocalCandidates.Single();
+            Assert.IsNull(candidate.EndPoint);
+            Assert.IsTrue(candidate.Address.EndsWith(".local", StringComparison.Ordinal));
+            Assert.IsTrue(Guid.TryParse(candidate.Address.Substring(0, candidate.Address.Length - ".local".Length), out _));
+
+            await Connect(resolving, hiding);
+
+            Assert.AreEqual(IceCandidateType.Host, resolving.SelectedPair.Remote.Type, "of the name resolved, not learnt of the checks");
+            Assert.AreEqual("127.0.0.1", resolving.SelectedPair.Remote.Address);
+            Assert.AreEqual("hidden", await SendAndReceive(resolving, hiding, "hidden"));
+            Assert.AreEqual("found", await SendAndReceive(hiding, resolving, "found"));
+        }
+
+        [TestMethod]
         public async Task ControlsALitePeer()
         {
             var traced = new ConcurrentQueue<string>();

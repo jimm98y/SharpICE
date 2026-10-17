@@ -224,6 +224,14 @@ namespace SharpICE
         /// <summary>What resolves the peer's candidates of mDNS names: of a test, one of its own responder.</summary>
         internal MdnsResolver Mdns { get; set; } = new MdnsResolver();
 
+        /// <summary>Of a test, the endpoint the responder of the agent's own names is of, rather than port 5353 and the groups.</summary>
+        internal IPEndPoint MdnsResponderEndPoint { get; set; }
+
+        /// <summary>The responder of the names of the agent's host candidates, of <see cref="IceAgentOptions.MdnsCandidates"/>.</summary>
+        internal MdnsResponder MdnsResponder => _mdns;
+
+        private MdnsResponder _mdns;
+
         private static string RandomIceString(int length)
         {
             byte[] bytes = new byte[length];
@@ -339,6 +347,19 @@ namespace SharpICE
 
             var addresses = GetLocalAddresses();
             var gathered = new List<IceCandidate>();
+            if (_options.MdnsCandidates)
+            {
+                var responder = new MdnsResponder(addresses, MdnsResponderEndPoint, Trace);
+                lock (_sync)
+                {
+                    if (_closed)
+                    {
+                        responder.Dispose();
+                        throw new ObjectDisposedException(nameof(IceAgent));
+                    }
+                    _mdns = responder;
+                }
+            }
             if (_options.IncludeUdp)
             {
                 for (int i = 0; i < addresses.Count; i++)
@@ -361,7 +382,7 @@ namespace SharpICE
                         Component = IceCandidate.RtpComponent,
                         Transport = "udp",
                         Priority = IceCandidate.ComputePriority(IceCandidateType.Host, 65535 - i, IceCandidate.RtpComponent),
-                        Address = endPoint.Address.ToString(),
+                        Address = HostAddress(endPoint.Address),
                         Port = endPoint.Port,
                         Type = IceCandidateType.Host,
                     };
@@ -379,6 +400,9 @@ namespace SharpICE
                 await GatherServerReflexiveAsync(gathered, cancellationToken).ConfigureAwait(false);
             return gathered;
         }
+
+        // a host candidate's address: of mDNS candidates, the name it is hidden behind
+        private string HostAddress(IPAddress address) => _mdns != null ? _mdns.Register(address) : address.ToString();
 
         private void AddBase(LocalBase local, List<IceCandidate> gathered)
         {
@@ -427,8 +451,9 @@ namespace SharpICE
                     Address = mapped.Address.ToString(),
                     Port = mapped.Port,
                     Type = IceCandidateType.ServerReflexive,
-                    RelatedAddress = local.EndPoint.Address.ToString(),
-                    RelatedPort = local.EndPoint.Port,
+                    // of mDNS candidates, no address of the host's (draft-ietf-mmusic-mdns-ice-candidates 3.1.2.2)
+                    RelatedAddress = _mdns != null ? "0.0.0.0" : local.EndPoint.Address.ToString(),
+                    RelatedPort = _mdns != null ? 0 : local.EndPoint.Port,
                 };
                 lock (_sync)
                     _localCandidates.Add(candidate);
@@ -638,8 +663,24 @@ namespace SharpICE
         {
             lock (_sync)
             {
-                if (_closed || _remoteCandidates.Any(c => c.IsTcp == candidate.IsTcp && Equals(c.EndPoint, endPoint)))
+                if (_closed)
                     return false;
+                var existing = _remoteCandidates.FirstOrDefault(c => c.IsTcp == candidate.IsTcp && Equals(c.EndPoint, endPoint));
+                if (existing != null)
+                {
+                    // a peer reflexive one learnt of the peer's checks before it was signalled - of an mDNS name resolved after
+                    // them, as one of them: of its signalled type, foundation and priority from now on (RFC 8445 7.3.1.3)
+                    if (existing.Type == IceCandidateType.PeerReflexive && candidate.Type != IceCandidateType.PeerReflexive)
+                    {
+                        existing.Type = candidate.Type;
+                        existing.Foundation = candidate.Foundation;
+                        existing.Priority = candidate.Priority;
+                        foreach (var pair in _pairs.Where(p => p.Remote == existing))
+                            pair.Priority = PairPriority(pair);
+                        Trace($"Signalled {existing}");
+                    }
+                    return false;
+                }
                 _remoteCandidates.Add(candidate);
                 _lastRemoteCandidate = DateTime.UtcNow;
                 foreach (var local in _bases)
@@ -1347,6 +1388,7 @@ namespace SharpICE
             }
             foreach (var connection in connections)
                 connection.Dispose();
+            _mdns?.Dispose();
             foreach (var gathering in _gatherings.Values.ToList())
                 gathering.TrySetResult(null);
             SetState(IceConnectionState.Closed);
