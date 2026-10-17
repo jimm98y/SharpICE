@@ -1,0 +1,32 @@
+<Project>
+	<PropertyGroup>
+		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+		<Nullable>disable</Nullable>
+		<Title>$(ProjectName)</Title>
+		<Version>0.1.0</Version>
+		<Authors>Lukas Volf</Authors>
+		<Copyright>MIT</Copyright>
+		<PackageProjectUrl>https://github.com/jimm98y/SharpICE</PackageProjectUrl>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+		<RepositoryUrl>https://github.com/jimm98y/SharpICE</RepositoryUrl>
+		<RepositoryType>git</RepositoryType>
+		<PackageTags>stun;turn;ice;webrtc;nat-traversal;netstandard20;net10</PackageTags>
+		<NeutralLanguage>en-US</NeutralLanguage>
+		<AssemblyVersion>1.0.0</AssemblyVersion>
+		<FileVersion>$(Version)</FileVersion>
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
+		<LangVersion>14.0</LangVersion>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="..\..\README.md">
+			<Pack>True</Pack>
+			<PackagePath>\</PackagePath>
+		</None>
+	</ItemGroup>
+
+	<PropertyGroup>
+		<PackageOutputPath>$(ProjectDir)..\..\nugets</PackageOutputPath>
+	</PropertyGroup>
+</Project>
