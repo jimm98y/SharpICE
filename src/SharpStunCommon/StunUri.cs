@@ -1,4 +1,4 @@
-﻿// SharpStunClient
+﻿// SharpStunCommon
 // Copyright (C) 2026 Lukas Volf
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -19,12 +19,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-using SharpStunCommon;
 using System;
 using System.Globalization;
 using System.Net;
 
-namespace SharpStunClient
+namespace SharpStunCommon
 {
     /// <summary>
     /// A STUN URI (RFC 7064) - "stun:host[:port]" or "stuns:host[:port]" - or a TURN URI (RFC 7065), of a "?transport=udp" or

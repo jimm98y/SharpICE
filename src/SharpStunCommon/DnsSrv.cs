@@ -1,4 +1,4 @@
-﻿// SharpStunClient
+﻿// SharpStunCommon
 // Copyright (C) 2026 Lukas Volf
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -19,7 +19,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-using SharpStunCommon;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -30,7 +29,7 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace SharpStunClient
+namespace SharpStunCommon
 {
     /// <summary>A DNS SRV record (RFC 2782): where a service is, and in what order to try it.</summary>
     internal sealed class DnsSrvRecord

@@ -8,6 +8,7 @@ What a STUN client and a STUN server share:
 1. The constants of STUN's methods, attributes and error codes, and of ICE's
 1. What else shares a transport of STUN: ChannelData, of its first byte [RFC7983](https://www.rfc-editor.org/rfc/rfc7983)
 1. The certificates of TLS and DTLS: loaded, and checked of a host name
+1. STUN and TURN URIs parsed [RFC7064](https://www.rfc-editor.org/rfc/rfc7064), [RFC7065](https://www.rfc-editor.org/rfc/rfc7065)
 
 ## SharpTurnCommon
 What a TURN client and a TURN server share, of SharpStunCommon: the constants of TURN's methods, attributes and error codes [RFC8656](https://www.rfc-editor.org/rfc/rfc8656); its attributes written and read - REQUESTED-TRANSPORT, the address families, EVEN-PORT, CHANNEL-NUMBER, LIFETIME, ADDRESS-ERROR-CODE, ICMP; and ChannelData, padded over a stream.
