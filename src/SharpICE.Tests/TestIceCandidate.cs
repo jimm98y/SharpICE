@@ -30,6 +30,39 @@
         }
 
         [TestMethod]
+        public void ReadsAndWritesATcpCandidate()
+        {
+            // as Chrome writes them (RFC 6544 4.5): the type of TCP among the extensions, where SDP has it
+            var candidate = IceCandidate.Parse("candidate:1340066476 1 tcp 1518280447 192.168.1.10 9 typ host tcptype active generation 0");
+
+            Assert.IsTrue(candidate.IsTcp);
+            Assert.IsFalse(candidate.IsUdp);
+            Assert.AreEqual(IceCandidate.TcpActive, candidate.TcpType);
+            Assert.AreEqual("candidate:1340066476 1 tcp 1518280447 192.168.1.10 9 typ host tcptype active generation 0", candidate.ToString());
+
+            candidate.TcpType = IceCandidate.TcpPassive;
+            Assert.AreEqual("candidate:1340066476 1 tcp 1518280447 192.168.1.10 9 typ host tcptype passive generation 0", candidate.ToString());
+
+            var made = new IceCandidate { Foundation = "t1", Transport = "tcp", Priority = 1, Address = "10.0.0.1", Port = 5000, Type = IceCandidateType.Host };
+            made.TcpType = IceCandidate.TcpPassive;
+            Assert.AreEqual("candidate:t1 1 tcp 1 10.0.0.1 5000 typ host tcptype passive", made.ToString());
+        }
+
+        [TestMethod]
+        public void ComputesThePrioritiesOfTcp()
+        {
+            // RFC 6544 4.2: a local preference of 2^13 times the direction's preference, and the address's
+            Assert.AreEqual((6 << 13) + 8191, IceCandidate.TcpLocalPreference(IceCandidate.TcpActive, 8191));
+            Assert.AreEqual((4 << 13) + 8191, IceCandidate.TcpLocalPreference(IceCandidate.TcpPassive, 8191));
+
+            // of TCP, below every host and server reflexive candidate of UDP
+            uint active = IceCandidate.ComputePriority(IceCandidateType.Host, IceCandidate.TcpLocalPreference(IceCandidate.TcpActive, 8191), 1, true);
+            Assert.AreEqual((90u << 24) + (((6u << 13) + 8191) << 8) + 255, active);
+            Assert.IsTrue(active < IceCandidate.ComputePriority(IceCandidateType.ServerReflexive, 0, 1));
+            Assert.AreEqual((6 << 13) + 8191, IceCandidate.Parse($"candidate:1 1 tcp {active} 10.0.0.1 9 typ host tcptype active").LocalPreference);
+        }
+
+        [TestMethod]
         public void LeavesOutWhatIsNoCandidate()
         {
             Assert.IsNull(IceCandidate.Parse("candidate:1 1 udp x 1.2.3.4 5 typ host"));

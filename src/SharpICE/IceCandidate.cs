@@ -64,18 +64,65 @@ namespace SharpICE
 
         public bool IsUdp => string.Equals(Transport, "udp", StringComparison.OrdinalIgnoreCase);
 
-        /// <summary>The preference of each type (RFC 8445 5.1.2.2): host first, relayed last.</summary>
-        public static int TypePreference(IceCandidateType type) => type switch
+        public bool IsTcp => string.Equals(Transport, "tcp", StringComparison.OrdinalIgnoreCase);
+
+        public const string TcpActive = "active";
+        public const string TcpPassive = "passive";
+        public const string TcpSimultaneousOpen = "so";
+
+        /// <summary>
+        /// Of a TCP candidate (RFC 6544 4.5), its "tcptype": "active" - it connects, of port 9 - "passive" - it is connected
+        /// to - or "so", simultaneous-open. Kept among <see cref="Extensions"/>, where SDP has it.
+        /// </summary>
+        public string TcpType
         {
-            IceCandidateType.Host => 126,
-            IceCandidateType.PeerReflexive => 110,
-            IceCandidateType.ServerReflexive => 100,
+            get
+            {
+                foreach (var extension in Extensions)
+                {
+                    if (extension.Key == "tcptype")
+                        return extension.Value;
+                }
+                return null;
+            }
+            set
+            {
+                int index = Extensions.FindIndex(e => e.Key == "tcptype");
+                if (index >= 0)
+                    Extensions.RemoveAt(index);
+                if (value != null)
+                    Extensions.Insert(index >= 0 ? index : 0, new KeyValuePair<string, string>("tcptype", value));
+            }
+        }
+
+        /// <summary>
+        /// The preference of each type (RFC 8445 5.1.2.2): host first, relayed last; of TCP, each below every one of UDP but
+        /// relayed ones, as Chrome has them, for UDP is to be preferred (RFC 6544 4.2).
+        /// </summary>
+        public static int TypePreference(IceCandidateType type, bool tcp = false) => type switch
+        {
+            IceCandidateType.Host => tcp ? 90 : 126,
+            IceCandidateType.PeerReflexive => tcp ? 80 : 110,
+            IceCandidateType.ServerReflexive => tcp ? 65 : 100,
             _ => 0
         };
 
-        /// <summary>The priority of a candidate (RFC 8445 5.1.2.1).</summary>
-        public static uint ComputePriority(IceCandidateType type, int localPreference, int component)
-            => (uint)((TypePreference(type) << 24) + ((localPreference & 0xFFFF) << 8) + (256 - component));
+        /// <summary>The priority of a candidate (RFC 8445 5.1.2.1), of UDP, or of TCP.</summary>
+        public static uint ComputePriority(IceCandidateType type, int localPreference, int component, bool tcp = false)
+            => (uint)((TypePreference(type, tcp) << 24) + ((localPreference & 0xFFFF) << 8) + (256 - component));
+
+        /// <summary>
+        /// The local preference of a TCP candidate (RFC 6544 4.2): 2^13 times its direction's preference - of a host candidate,
+        /// active 6, passive 4, simultaneous-open 2 - and the preference of its address, below 2^13.
+        /// </summary>
+        public static int TcpLocalPreference(string tcpType, int otherPreference)
+        {
+            int direction = tcpType == TcpActive ? 6 : tcpType == TcpPassive ? 4 : 2;
+            return (direction << 13) + (otherPreference & 0x1FFF);
+        }
+
+        /// <summary>The local preference a candidate's priority is of: its bits 8 to 23.</summary>
+        public int LocalPreference => (int)((Priority >> 8) & 0xFFFF);
 
         public static string TypeName(IceCandidateType type) => type switch
         {

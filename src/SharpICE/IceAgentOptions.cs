@@ -55,6 +55,32 @@ namespace SharpICE
         /// <summary>Which of the local addresses to gather candidates of; all, of none given.</summary>
         public Func<IPAddress, bool> AddressFilter { get; set; }
 
+        /// <summary>Whether to gather candidates of UDP: a socket of each address, and the server reflexive ones of it.</summary>
+        public bool IncludeUdp { get; set; } = true;
+
+        /// <summary>
+        /// Whether to gather candidates of TCP (RFC 6544): of each address, a passive one - a listener the peer connects to -
+        /// and an active one, which connects to the peer's passive ones. Of a peer UDP does not reach, as behind a firewall that
+        /// lets TCP alone through; UDP's are preferred over them.
+        /// </summary>
+        public bool IncludeTcp { get; set; } = false;
+
+        /// <summary>
+        /// Whether the agent is an ICE lite one (RFC 8445 2.5): of host candidates alone, it sends no checks and answers the
+        /// peer's, controlled, the pair the peer nominates selected. Of a server of an address the peer reaches; its session
+        /// description is to say "a=ice-lite".
+        /// </summary>
+        public bool Lite { get; set; } = false;
+
+        /// <summary>
+        /// Whether to resolve the peer's candidates of mDNS names (".local"), as browsers hide their addresses behind, of a query
+        /// of multicast DNS (RFC 6762); else they are left out, and a peer reflexive candidate is learnt of the peer's checks.
+        /// </summary>
+        public bool ResolveMdns { get; set; } = true;
+
+        /// <summary>How long to wait for the answer to an mDNS query.</summary>
+        public TimeSpan MdnsTimeout { get; set; } = TimeSpan.FromSeconds(2);
+
         /// <summary>The ports its sockets are bound to; any the system gives, of 0.</summary>
         public int PortMin { get; set; } = 0;
         public int PortMax { get; set; } = 0;
@@ -71,7 +97,7 @@ namespace SharpICE
         /// <summary>How long to wait for a STUN server's answer when gathering.</summary>
         public TimeSpan StunServerTimeout { get; set; } = TimeSpan.FromSeconds(1.5);
 
-        /// <summary>How often its consent to send on the selected pair is checked (RFC 7675 5.1: 5 s on average).</summary>
+        /// <summary>How often its consent to send on the selected pair is checked: at random, of 0.8 to 1.2 times this (RFC 7675 5.1: 5 s on average).</summary>
         public TimeSpan ConsentInterval { get; set; } = TimeSpan.FromSeconds(5);
 
         /// <summary>After how long of no consent the connection is disconnected, then failed (RFC 7675 5.1: 30 s).</summary>

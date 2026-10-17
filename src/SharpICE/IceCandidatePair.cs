@@ -56,7 +56,15 @@ namespace SharpICE
 
         public IPEndPoint RemoteEndPoint { get; }
 
-        public IPEndPoint LocalEndPoint => Base.EndPoint;
+        /// <summary>
+        /// The address its data goes from: of a pair of UDP, the socket's; of one of TCP, the connection's, once there is one.
+        /// </summary>
+        public IPEndPoint LocalEndPoint => Connection?.LocalEndPoint ?? Base.EndPoint;
+
+        /// <summary>The pair's foundation (RFC 8445 6.1.2.6): of its local and its remote candidate's; those of one checked alike.</summary>
+        public string Foundation => Local.Foundation + ":" + Remote.Foundation;
+
+        public bool IsTcp => Local.IsTcp;
 
         public IceCandidatePairState State { get; internal set; } = IceCandidatePairState.Waiting;
 
@@ -72,8 +80,12 @@ namespace SharpICE
         /// <summary>When a check of ours on it last succeeded; <see cref="DateTime.MinValue"/> of none.</summary>
         public DateTime LastSucceeded { get; internal set; } = DateTime.MinValue;
 
+        // of TCP: the connection the checks and the data go over (RFC 6544)
+        internal IceTcpConnection Connection;
+
         // the check in flight, and whether it is to nominate the pair
         internal byte[] Request;
+        internal DateTime CheckStarted;
         internal byte[] TransactionId;
         internal int Transmissions;
         internal TimeSpan Timeout;

@@ -67,28 +67,64 @@ namespace SharpICE
 
     /// <summary>
     /// An ICE agent (RFC 8445) of one component - RTP and RTCP multiplexed on it (RFC 5761), all media bundled (RFC 9143), as
-    /// WebRTC has it. It gathers host candidates of the local addresses, a socket each, and server reflexive ones of STUN servers;
-    /// checks the pairs of them and the peer's candidates; and once one is selected, sends and receives the data of the layers
-    /// above on it - every datagram that is not STUN.
+    /// WebRTC has it. It gathers host candidates of the local addresses, a socket each, and server reflexive ones of STUN servers,
+    /// and of TCP, if asked to, passive and active ones (RFC 6544); checks the pairs of them and the peer's candidates; and once
+    /// one is selected, sends and receives the data of the layers above on it - every datagram that is not STUN.
     /// </summary>
     /// <remarks>
-    /// Checks are paced one every Ta, triggered ones first; a check is retransmitted as RFC 8489 6.2.1 says, and its pair fails
-    /// once it is not answered. Controlling, it nominates the first pair that succeeds (RFC 8445 8.1.1); controlled, it selects
-    /// the pair the peer nominates, and until then the best that succeeded, so that data can flow as soon as a pair does. The
-    /// consent to send on the selected pair is checked every few seconds (RFC 7675).
+    /// <para>
+    /// Checks are paced one every Ta, triggered ones first, then the waiting pair of the highest priority, then a frozen one of a
+    /// foundation none of whose pairs is being checked - a pair's foundation unfrozen once one of its pairs succeeds (RFC 8445
+    /// 6.1.4.2). A check is retransmitted over UDP as RFC 8489 6.2.1 says, and its pair fails once it is not answered.
+    /// Controlling, it nominates the first pair that succeeds (RFC 8445 8.1.1); controlled, it selects the pair the peer
+    /// nominates, and until then the best that succeeded, so that data can flow as soon as a pair does. The consent to send on
+    /// the selected pair is checked every few seconds (RFC 7675).
+    /// </para>
+    /// <para>
+    /// The peer's candidates are trickled (RFC 8838): it fails once all its pairs did and the peer said its candidates are
+    /// complete - or, of no end-of-candidates, once none came for a while. One of an mDNS name is resolved first. Of a lite peer it
+    /// controls (RFC 8445 6.1.1); lite itself, it sends no checks. A restart (RFC 8445 9) begins the checks again of new
+    /// credentials, the data going by the pair selected until another is.
+    /// </para>
     /// </remarks>
-    public sealed class IceAgent : IDisposable
+    public sealed partial class IceAgent : IDisposable
     {
         // ICE's ufrag of at least 24 bits of randomness and pwd of 128 (RFC 8445 5.3), of the ice-char of RFC 8839
         private const string IceChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         private const int MaxDatagram = 65536;
 
+        // how long after the last of the peer's candidates its pairs, all failed, fail the agent, of no end-of-candidates
+        private static readonly TimeSpan TrickleWait = TimeSpan.FromSeconds(5);
+
         internal sealed class LocalBase
         {
+            // of UDP, the socket; of a passive candidate of TCP, the listener; of an active one, neither
             public Socket Socket;
+            public TcpListener Listener;
+
+            // the socket's or the listener's; of an active candidate of TCP, its address and port 9
             public IPEndPoint EndPoint;
             public IceCandidate Candidate;
-            public byte[] Buffer = new byte[MaxDatagram];
+            public byte[] Buffer;
+
+            public bool IsTcp => Candidate.IsTcp;
+        }
+
+        // a STUN message to send: over a connection of TCP, or of the base's socket to an address
+        private readonly struct Outgoing
+        {
+            public Outgoing(LocalBase local, IceTcpConnection connection, byte[] bytes, IPEndPoint to)
+            {
+                Base = local;
+                Connection = connection;
+                Bytes = bytes;
+                To = to;
+            }
+
+            public LocalBase Base { get; }
+            public IceTcpConnection Connection { get; }
+            public byte[] Bytes { get; }
+            public IPEndPoint To { get; }
         }
 
         private readonly object _sync = new object();
@@ -99,28 +135,38 @@ namespace SharpICE
         private readonly List<IceCandidatePair> _pairs = new List<IceCandidatePair>();
         private readonly LinkedList<IceCandidatePair> _triggered = new LinkedList<IceCandidatePair>();
         private readonly Dictionary<string, IceCandidatePair> _transactions = new Dictionary<string, IceCandidatePair>();
+        private readonly List<IceTcpConnection> _connections = new List<IceTcpConnection>();
+        private readonly Random _random = new Random();
 
         // the requests of gathering, each the base it was sent from and what is waiting for its answer
         private readonly Dictionary<string, TaskCompletionSource<IPEndPoint>> _gatherings = new Dictionary<string, TaskCompletionSource<IPEndPoint>>();
 
         private Timer _timer;
         private int _ticking;
+        private bool _gathered;
         private bool _started;
         private bool _closed;
+        private bool _restarting;
         private DateTime _lastConsentCheck = DateTime.MinValue;
+        private TimeSpan _consentInterval;
         private DateTime _lastRemoteCandidate = DateTime.UtcNow;
+        private bool _remoteGatheringComplete;
+        private DateTime _remoteGatheringCompletedAt;
+        private int _resolving;
         private byte[] _remoteKey;
 
         public IceAgent(IceAgentOptions options = null)
         {
             _options = options ?? new IceAgentOptions();
-            Role = _options.Role;
+            // a lite agent is controlled (RFC 8445 6.1.1)
+            Role = _options.Lite ? IceRole.Controlled : _options.Role;
             LocalUfrag = RandomIceString(8);
             LocalPassword = RandomIceString(24);
             byte[] tieBreaker = new byte[8];
             using (var random = RandomNumberGenerator.Create())
                 random.GetBytes(tieBreaker);
             TieBreaker = BitConverter.ToUInt64(tieBreaker, 0);
+            _consentInterval = NextConsentInterval();
         }
 
         public IceRole Role { get; private set; }
@@ -128,13 +174,27 @@ namespace SharpICE
         /// <summary>The tie-breaker a role conflict is resolved by (RFC 8445 7.3.1.1).</summary>
         public ulong TieBreaker { get; }
 
-        public string LocalUfrag { get; }
+        /// <summary>The agent's ice-ufrag: a new one of each restart.</summary>
+        public string LocalUfrag { get; private set; }
 
-        public string LocalPassword { get; }
+        /// <summary>The agent's ice-pwd: a new one of each restart.</summary>
+        public string LocalPassword { get; private set; }
 
         public string RemoteUfrag { get; private set; }
 
         public string RemotePassword { get; private set; }
+
+        /// <summary>Whether the agent is a lite one: its session description is to say "a=ice-lite".</summary>
+        public bool IsLite => _options.Lite;
+
+        /// <summary>Whether the peer is a lite agent, of its session description's "a=ice-lite".</summary>
+        public bool RemoteIsLite { get; private set; }
+
+        /// <summary>Whether the peer said it has no more candidates: its "a=end-of-candidates".</summary>
+        public bool RemoteGatheringComplete
+        {
+            get { lock (_sync) return _remoteGatheringComplete; }
+        }
 
         public IceConnectionState State { get; private set; } = IceConnectionState.New;
 
@@ -161,6 +221,9 @@ namespace SharpICE
         public event EventHandler<IceCandidatePair> SelectedPairChanged;
         public event EventHandler<IceDataReceivedEventArgs> DataReceived;
 
+        /// <summary>What resolves the peer's candidates of mDNS names: of a test, one of its own responder.</summary>
+        internal MdnsResolver Mdns { get; set; } = new MdnsResolver();
+
         private static string RandomIceString(int length)
         {
             byte[] bytes = new byte[length];
@@ -170,6 +233,13 @@ namespace SharpICE
             for (int i = 0; i < length; i++)
                 chars[i] = IceChars[bytes[i] % IceChars.Length];
             return new string(chars);
+        }
+
+        // RFC 7675 5.1: of 0.8 to 1.2 times the interval, at random, that the checks of many agents do not fall together
+        private TimeSpan NextConsentInterval()
+        {
+            lock (_random)
+                return TimeSpan.FromTicks((long)(_options.ConsentInterval.Ticks * (0.8 + 0.4 * _random.NextDouble())));
         }
 
         private void Trace(string message) => _options.Trace?.Invoke(message);
@@ -251,9 +321,10 @@ namespace SharpICE
         }
 
         /// <summary>
-        /// Gathers the candidates (RFC 8445 5.1.1): a host candidate of each local address, of a socket bound to it, then a server
-        /// reflexive one of each STUN server that answers, of each IPv4 socket. Each is told of as it is gathered too, to be
-        /// trickled. Once only: the candidates of a second call are those of the first.
+        /// Gathers the candidates (RFC 8445 5.1.1): a host candidate of each local address, of a socket bound to it; of TCP, a
+        /// passive and an active one of each; then - of a full agent - a server reflexive one of each STUN server that answers, of
+        /// each IPv4 socket. Each is told of as it is gathered too, to be trickled. Once only: the candidates of a second call are
+        /// those of the first.
         /// </summary>
         public async Task<IReadOnlyList<IceCandidate>> GatherCandidatesAsync(CancellationToken cancellationToken = default)
         {
@@ -261,52 +332,66 @@ namespace SharpICE
             {
                 if (_closed)
                     throw new ObjectDisposedException(nameof(IceAgent));
-                if (_bases.Count > 0)
+                if (_gathered)
                     return _localCandidates.ToList();
+                _gathered = true;
             }
 
             var addresses = GetLocalAddresses();
             var gathered = new List<IceCandidate>();
-            for (int i = 0; i < addresses.Count; i++)
+            if (_options.IncludeUdp)
             {
-                Socket socket;
-                try
+                for (int i = 0; i < addresses.Count; i++)
                 {
-                    socket = Bind(addresses[i]);
-                }
-                catch (SocketException ex)
-                {
-                    Trace($"Could not bind {addresses[i]}: {ex.Message}");
-                    continue;
-                }
+                    Socket socket;
+                    try
+                    {
+                        socket = Bind(addresses[i]);
+                    }
+                    catch (SocketException ex)
+                    {
+                        Trace($"Could not bind {addresses[i]}: {ex.Message}");
+                        continue;
+                    }
 
-                var endPoint = (IPEndPoint)socket.LocalEndPoint;
-                var candidate = new IceCandidate
-                {
-                    Foundation = (i + 1).ToString(CultureInfo.InvariantCulture),
-                    Component = IceCandidate.RtpComponent,
-                    Transport = "udp",
-                    Priority = IceCandidate.ComputePriority(IceCandidateType.Host, 65535 - i, IceCandidate.RtpComponent),
-                    Address = endPoint.Address.ToString(),
-                    Port = endPoint.Port,
-                    Type = IceCandidateType.Host,
-                };
-                var local = new LocalBase { Socket = socket, EndPoint = endPoint, Candidate = candidate };
-                lock (_sync)
-                {
-                    _bases.Add(local);
-                    _localCandidates.Add(candidate);
-                    foreach (var remote in _remoteCandidates)
-                        AddPair(local, remote);
+                    var endPoint = (IPEndPoint)socket.LocalEndPoint;
+                    var candidate = new IceCandidate
+                    {
+                        Foundation = (i + 1).ToString(CultureInfo.InvariantCulture),
+                        Component = IceCandidate.RtpComponent,
+                        Transport = "udp",
+                        Priority = IceCandidate.ComputePriority(IceCandidateType.Host, 65535 - i, IceCandidate.RtpComponent),
+                        Address = endPoint.Address.ToString(),
+                        Port = endPoint.Port,
+                        Type = IceCandidateType.Host,
+                    };
+                    var local = new LocalBase { Socket = socket, EndPoint = endPoint, Candidate = candidate, Buffer = new byte[MaxDatagram] };
+                    AddBase(local, gathered);
+                    StartReceiving(local);
                 }
-                gathered.Add(candidate);
-                Trace($"Gathered {candidate}");
-                StartReceiving(local);
-                CandidateGathered?.Invoke(this, candidate);
             }
 
-            await GatherServerReflexiveAsync(gathered, cancellationToken).ConfigureAwait(false);
+            if (_options.IncludeTcp)
+                GatherTcp(addresses, gathered);
+
+            // a lite agent is of host candidates alone (RFC 8445 2.5)
+            if (_options.IncludeUdp && !IsLite)
+                await GatherServerReflexiveAsync(gathered, cancellationToken).ConfigureAwait(false);
             return gathered;
+        }
+
+        private void AddBase(LocalBase local, List<IceCandidate> gathered)
+        {
+            lock (_sync)
+            {
+                _bases.Add(local);
+                _localCandidates.Add(local.Candidate);
+                foreach (var remote in _remoteCandidates)
+                    AddPair(local, remote);
+            }
+            gathered.Add(local.Candidate);
+            Trace($"Gathered {local.Candidate}");
+            CandidateGathered?.Invoke(this, local.Candidate);
         }
 
         private async Task GatherServerReflexiveAsync(List<IceCandidate> gathered, CancellationToken cancellationToken)
@@ -317,7 +402,7 @@ namespace SharpICE
             var requests = new List<Task<(LocalBase Base, IPEndPoint Mapped)>>();
             foreach (string server in _options.StunServers)
             {
-                foreach (var local in _bases.Where(b => b.EndPoint.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(b.EndPoint.Address)))
+                foreach (var local in _bases.Where(b => b.Socket != null && b.EndPoint.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(b.EndPoint.Address)))
                     requests.Add(RequestMappedAsync(local, server, cancellationToken));
             }
 
@@ -395,31 +480,89 @@ namespace SharpICE
 
         #region Remote
 
-        /// <summary>The peer's ice-ufrag and ice-pwd: of its session description.</summary>
-        public void SetRemoteCredentials(string ufrag, string password)
+        /// <summary>
+        /// The peer's ice-ufrag and ice-pwd: of its session description. Of others than the peer had, after the checks began, the
+        /// peer restarted ICE, and so does the agent (RFC 8445 9): true then, and the agent's own credentials are new, to answer
+        /// with, its candidates to be signalled again, as the peer's are.
+        /// </summary>
+        public bool SetRemoteCredentials(string ufrag, string password)
         {
+            if (ufrag == null)
+                throw new ArgumentNullException(nameof(ufrag));
+            if (password == null)
+                throw new ArgumentNullException(nameof(password));
+
+            bool restarted = false;
             lock (_sync)
             {
-                RemoteUfrag = ufrag ?? throw new ArgumentNullException(nameof(ufrag));
-                RemotePassword = password ?? throw new ArgumentNullException(nameof(password));
+                if (RemoteUfrag != null && !_restarting && (RemoteUfrag != ufrag || RemotePassword != password))
+                {
+                    RestartUnderLock();
+                    restarted = true;
+                }
+                RemoteUfrag = ufrag;
+                RemotePassword = password;
                 _remoteKey = StunMessage.ShortTermKey(password);
+                _restarting = false;
             }
+            if (restarted)
+                Trace("Restarted by the peer: new local credentials");
+            return restarted;
         }
 
         /// <summary>
-        /// A candidate of the peer's - of its session description, or trickled - of component 1 and UDP; one of a name is
-        /// resolved, but not one of mDNS (".local"), which is left out. False of one that is not used.
+        /// Whether the peer is a lite agent, of its session description's "a=ice-lite": of one, a full agent controls (RFC 8445
+        /// 6.1.1), as the peer sends no checks.
+        /// </summary>
+        public void SetRemoteLite(bool lite)
+        {
+            bool switched = false;
+            lock (_sync)
+            {
+                RemoteIsLite = lite;
+                if (lite && !IsLite && Role != IceRole.Controlling)
+                {
+                    SwitchRole(IceRole.Controlling);
+                    switched = true;
+                }
+            }
+            if (switched)
+                Trace("The peer is lite: controlling");
+        }
+
+        /// <summary>
+        /// A candidate of the peer's - of its session description, or trickled - of component 1, of UDP, or of TCP of an agent
+        /// of TCP, active or passive. One of a name is resolved; one of an mDNS name (".local") of multicast DNS, after this
+        /// returns. False of one that is not used.
         /// </summary>
         public bool AddRemoteCandidate(IceCandidate candidate)
         {
-            if (candidate == null || !candidate.IsUdp || candidate.Component != IceCandidate.RtpComponent)
+            if (candidate == null || candidate.Component != IceCandidate.RtpComponent)
+                return false;
+            if (!candidate.IsUdp && !(candidate.IsTcp && _options.IncludeTcp))
+                return false;
+            // of TCP, active and passive ones; simultaneous-open is not done
+            if (candidate.IsTcp && candidate.TcpType != IceCandidate.TcpActive && candidate.TcpType != IceCandidate.TcpPassive)
                 return false;
 
             var endPoint = candidate.EndPoint;
             if (endPoint == null)
             {
-                if (candidate.Address == null || candidate.Address.EndsWith(".local", StringComparison.OrdinalIgnoreCase))
+                if (candidate.Address == null)
                     return false;
+                if (candidate.Address.EndsWith(".local", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!_options.ResolveMdns)
+                        return false;
+                    lock (_sync)
+                    {
+                        if (_closed)
+                            return false;
+                        _resolving++;
+                    }
+                    _ = ResolveMdnsAsync(candidate);
+                    return true;
+                }
                 try
                 {
                     var address = Dns.GetHostAddresses(candidate.Address).FirstOrDefault();
@@ -433,10 +576,69 @@ namespace SharpICE
                     return false;
                 }
             }
+            return AddResolved(candidate, endPoint);
+        }
 
+        /// <summary>A candidate of its SDP line; of "end-of-candidates", the peer has no more (see <see cref="SetRemoteGatheringComplete"/>).</summary>
+        public bool AddRemoteCandidate(string candidate)
+        {
+            string text = candidate?.Trim();
+            if (text == "end-of-candidates" || text == "a=end-of-candidates")
+            {
+                SetRemoteGatheringComplete();
+                return true;
+            }
+            return AddRemoteCandidate(IceCandidate.Parse(candidate));
+        }
+
+        /// <summary>
+        /// The peer has no more candidates: its "a=end-of-candidates" (RFC 8838 13). Once all the pairs failed, the agent fails at
+        /// once rather than waiting for more.
+        /// </summary>
+        public void SetRemoteGatheringComplete()
+        {
             lock (_sync)
             {
-                if (_closed || _remoteCandidates.Any(c => Equals(c.EndPoint, endPoint)))
+                if (_remoteGatheringComplete)
+                    return;
+                _remoteGatheringComplete = true;
+                _remoteGatheringCompletedAt = DateTime.UtcNow;
+            }
+            Trace("The peer's candidates are complete");
+        }
+
+        private async Task ResolveMdnsAsync(IceCandidate candidate)
+        {
+            string name = candidate.Address;
+            try
+            {
+                var locals = GetLocalAddresses().Where(a => !IPAddress.IsLoopback(a) || _options.IncludeLoopback).ToList();
+                var address = await Mdns.ResolveAsync(name, locals, _options.IncludeIPv6, _options.MdnsTimeout).ConfigureAwait(false);
+                if (address == null)
+                {
+                    Trace($"Could not resolve {name}");
+                    return;
+                }
+                Trace($"Resolved {name}: {address}");
+                candidate.Address = address.ToString();
+                AddResolved(candidate, new IPEndPoint(address, candidate.Port));
+            }
+            catch (Exception ex)
+            {
+                Trace($"Resolving {name} failed: {ex.Message}");
+            }
+            finally
+            {
+                lock (_sync)
+                    _resolving--;
+            }
+        }
+
+        private bool AddResolved(IceCandidate candidate, IPEndPoint endPoint)
+        {
+            lock (_sync)
+            {
+                if (_closed || _remoteCandidates.Any(c => c.IsTcp == candidate.IsTcp && Equals(c.EndPoint, endPoint)))
                     return false;
                 _remoteCandidates.Add(candidate);
                 _lastRemoteCandidate = DateTime.UtcNow;
@@ -447,8 +649,6 @@ namespace SharpICE
             return true;
         }
 
-        public bool AddRemoteCandidate(string candidate) => AddRemoteCandidate(IceCandidate.Parse(candidate));
-
         // under the lock
         private IceCandidatePair AddPair(LocalBase local, IceCandidate remote)
         {
@@ -458,6 +658,12 @@ namespace SharpICE
             // a loopback address reaches only one of its own, and one of a network only one of a network
             if (IPAddress.IsLoopback(endPoint.Address) != IPAddress.IsLoopback(local.EndPoint.Address))
                 return null;
+            if (local.IsTcp != remote.IsTcp)
+                return null;
+            // of TCP, an active candidate of the peer's passive ones; a passive one's pairs are of the connections the peer
+            // makes to it, as its checks come over them (RFC 6544 6.2)
+            if (local.IsTcp && (local.Candidate.TcpType != IceCandidate.TcpActive || remote.TcpType != IceCandidate.TcpPassive))
+                return null;
 
             var existing = _pairs.FirstOrDefault(p => p.Base == local && p.RemoteEndPoint.Equals(endPoint));
             if (existing != null)
@@ -465,6 +671,10 @@ namespace SharpICE
 
             var pair = new IceCandidatePair(local, remote, endPoint);
             pair.Priority = PairPriority(pair);
+            // one pair of a foundation is checked at a time, the others frozen until one of them succeeds (RFC 8445 6.1.2.6)
+            pair.State = _pairs.Any(p => p.Foundation == pair.Foundation && (p.State == IceCandidatePairState.Waiting || p.State == IceCandidatePairState.InProgress))
+                ? IceCandidatePairState.Frozen
+                : IceCandidatePairState.Waiting;
             _pairs.Add(pair);
             return pair;
         }
@@ -477,7 +687,7 @@ namespace SharpICE
 
         #region Checks
 
-        /// <summary>Begins the checks: of the pairs there are, and of those of candidates added after.</summary>
+        /// <summary>Begins the checks: of the pairs there are, and of those of candidates added after. Of a lite agent, the answers alone.</summary>
         public void Start()
         {
             lock (_sync)
@@ -486,7 +696,7 @@ namespace SharpICE
                     throw new ObjectDisposedException(nameof(IceAgent));
                 if (_started)
                     return;
-                if (RemoteUfrag == null)
+                if (RemoteUfrag == null && !IsLite)
                     throw new InvalidOperationException("The peer's credentials are not known: see SetRemoteCredentials.");
                 _started = true;
                 _lastRemoteCandidate = DateTime.UtcNow;
@@ -495,13 +705,63 @@ namespace SharpICE
             _timer = new Timer(_ => Tick(), null, TimeSpan.Zero, _options.CheckInterval);
         }
 
+        /// <summary>
+        /// Restarts ICE (RFC 8445 9): new local credentials - to be signalled, with the candidates, in a new offer - and the peer's
+        /// candidates and credentials forgotten, until it signals them anew. The data goes by the pair selected until another
+        /// is; the agent's candidates stay what they are.
+        /// </summary>
+        public void Restart()
+        {
+            lock (_sync)
+            {
+                if (_closed)
+                    throw new ObjectDisposedException(nameof(IceAgent));
+                RestartUnderLock();
+                _restarting = true;
+            }
+            Trace("Restarted: new local credentials");
+        }
+
+        // under the lock
+        private void RestartUnderLock()
+        {
+            LocalUfrag = RandomIceString(8);
+            LocalPassword = RandomIceString(24);
+            RemoteUfrag = null;
+            RemotePassword = null;
+            _remoteKey = null;
+            _remoteCandidates.Clear();
+            _triggered.Clear();
+            _transactions.Clear();
+            _remoteGatheringComplete = false;
+            _lastRemoteCandidate = DateTime.UtcNow;
+            _pairs.Clear();
+
+            var selected = SelectedPair;
+            if (selected != null)
+            {
+                // the data goes on by it, its consent not checked until a pair of the new credentials is selected
+                selected.Nominated = false;
+                selected.Nominating = false;
+                selected.LastConsent = DateTime.UtcNow;
+                if (selected.State == IceCandidatePairState.InProgress)
+                    selected.State = IceCandidatePairState.Succeeded;
+            }
+            foreach (var connection in _connections.Where(c => c != selected?.Connection).ToList())
+            {
+                _connections.Remove(connection);
+                connection.Dispose();
+            }
+        }
+
         private void Tick()
         {
             if (Interlocked.Exchange(ref _ticking, 1) == 1)
                 return;
             try
             {
-                var sends = new List<(LocalBase Base, byte[] Bytes, IPEndPoint To)>();
+                var sends = new List<Outgoing>();
+                var connects = new List<IceCandidatePair>();
                 IceConnectionState? newState = null;
                 lock (_sync)
                 {
@@ -509,49 +769,55 @@ namespace SharpICE
                         return;
                     DateTime now = DateTime.UtcNow;
 
-                    // the checks in flight, retransmitted, or given up
-                    foreach (var pair in _pairs)
+                    // a lite agent sends no checks (RFC 8445 2.5)
+                    if (!IsLite)
                     {
-                        if (pair.State != IceCandidatePairState.InProgress || now < pair.NextTransmission)
-                            continue;
-                        if (pair.Transmissions >= _options.MaxTransmissions)
+                        // the checks in flight, retransmitted, or given up
+                        foreach (var pair in _pairs)
                         {
-                            _transactions.Remove(Key(pair.TransactionId));
-                            pair.State = pair.LastSucceeded > DateTime.MinValue ? IceCandidatePairState.Succeeded : IceCandidatePairState.Failed;
-                            Trace($"Check timed out: {pair}");
-                            continue;
+                            if (pair.State != IceCandidatePairState.InProgress || now < pair.NextTransmission)
+                                continue;
+                            // over TCP, no retransmissions (RFC 6544 7.1): given up as late as one of UDP is
+                            if (pair.IsTcp || pair.Transmissions >= _options.MaxTransmissions)
+                            {
+                                _transactions.Remove(Key(pair.TransactionId));
+                                pair.State = pair.LastSucceeded > DateTime.MinValue ? IceCandidatePairState.Succeeded : IceCandidatePairState.Failed;
+                                Trace($"Check timed out: {pair}");
+                                continue;
+                            }
+                            pair.Transmissions++;
+                            pair.Timeout = TimeSpan.FromTicks(pair.Timeout.Ticks * 2);
+                            pair.NextTransmission = now + pair.Timeout;
+                            sends.Add(new Outgoing(pair.Base, null, pair.Request, pair.RemoteEndPoint));
                         }
-                        pair.Transmissions++;
-                        pair.Timeout = TimeSpan.FromTicks(pair.Timeout.Ticks * 2);
-                        pair.NextTransmission = now + pair.Timeout;
-                        sends.Add((pair.Base, pair.Request, pair.RemoteEndPoint));
+
+                        // one new check every Ta, of the peer's credentials known: a triggered one first, else an ordinary one
+                        if (_remoteKey != null)
+                        {
+                            IceCandidatePair next = null;
+                            while (_triggered.Count > 0 && next == null)
+                            {
+                                var triggered = _triggered.First.Value;
+                                _triggered.RemoveFirst();
+                                if (triggered.State != IceCandidatePairState.InProgress && _pairs.Contains(triggered))
+                                    next = triggered;
+                            }
+                            next ??= NextOrdinaryCheck();
+                            if (next != null)
+                                Check(next, now, sends, connects);
+                        }
                     }
 
-                    // one new check every Ta: a triggered one first, else the waiting pair of the highest priority
-                    IceCandidatePair next = null;
-                    while (_triggered.Count > 0 && next == null)
-                    {
-                        var triggered = _triggered.First.Value;
-                        _triggered.RemoveFirst();
-                        if (triggered.State != IceCandidatePairState.InProgress)
-                            next = triggered;
-                    }
-                    if (next == null)
-                    {
-                        next = _pairs.Where(p => p.State == IceCandidatePairState.Waiting || p.State == IceCandidatePairState.Frozen)
-                            .OrderByDescending(p => p.Priority).FirstOrDefault();
-                    }
-                    if (next != null)
-                        sends.Add((next.Base, BeginCheck(next, now), next.RemoteEndPoint));
-
-                    // the consent of the selected pair
+                    // the consent of the selected pair: not of one of credentials a restart left behind
                     var selected = SelectedPair;
                     if (selected != null)
                     {
-                        if (now - _lastConsentCheck >= _options.ConsentInterval && selected.State != IceCandidatePairState.InProgress)
+                        if (!IsLite && _remoteKey != null && _pairs.Contains(selected) && now - _lastConsentCheck >= _consentInterval
+                            && selected.State != IceCandidatePairState.InProgress)
                         {
                             _lastConsentCheck = now;
-                            sends.Add((selected.Base, BeginCheck(selected, now), selected.RemoteEndPoint));
+                            _consentInterval = NextConsentInterval();
+                            Check(selected, now, sends, connects);
                         }
 
                         TimeSpan silent = now - selected.LastConsent;
@@ -562,15 +828,22 @@ namespace SharpICE
                         else if (State == IceConnectionState.Disconnected)
                             newState = IceConnectionState.Connected;
                     }
-                    else if (_pairs.Count > 0 && _pairs.All(p => p.State == IceCandidatePairState.Failed)
-                        && now - _lastRemoteCandidate > TimeSpan.FromSeconds(5))
+                    else if (!IsLite && _resolving == 0 && _remoteKey != null)
                     {
-                        newState = IceConnectionState.Failed;
+                        // all the pairs failed: at once of the peer's candidates complete (RFC 8838 8), else once none came for
+                        // a while; of no pair at all, once the peer's checks made none either
+                        bool allFailed = _pairs.Count > 0 && _pairs.All(p => p.State == IceCandidatePairState.Failed);
+                        if (allFailed && (_remoteGatheringComplete || now - _lastRemoteCandidate > TrickleWait))
+                            newState = IceConnectionState.Failed;
+                        else if (_pairs.Count == 0 && _remoteGatheringComplete && now - _remoteGatheringCompletedAt > _options.DisconnectedTimeout)
+                            newState = IceConnectionState.Failed;
                     }
                 }
 
-                foreach (var (local, bytes, to) in sends)
-                    Send(local, bytes, to);
+                foreach (var outgoing in sends)
+                    SendStun(outgoing);
+                foreach (var pair in connects)
+                    _ = ConnectAsync(pair);
                 if (newState != null)
                     SetState(newState.Value);
             }
@@ -584,6 +857,32 @@ namespace SharpICE
             }
         }
 
+        // under the lock: the waiting pair of the highest priority; of none, the frozen one of the highest of a foundation none
+        // of whose pairs is waiting or in progress (RFC 8445 6.1.4.2)
+        private IceCandidatePair NextOrdinaryCheck()
+        {
+            var waiting = _pairs.Where(p => p.State == IceCandidatePairState.Waiting && IsCheckable(p)).OrderByDescending(p => p.Priority).FirstOrDefault();
+            if (waiting != null)
+                return waiting;
+            var busy = new HashSet<string>(_pairs.Where(p => p.State == IceCandidatePairState.Waiting || p.State == IceCandidatePairState.InProgress).Select(p => p.Foundation));
+            return _pairs.Where(p => p.State == IceCandidatePairState.Frozen && IsCheckable(p) && !busy.Contains(p.Foundation))
+                .OrderByDescending(p => p.Priority).FirstOrDefault();
+        }
+
+        // of TCP, a pair of the agent's active candidate, or one of a connection there is
+        private static bool IsCheckable(IceCandidatePair pair)
+            => !pair.IsTcp || pair.Connection != null || pair.Local.TcpType == IceCandidate.TcpActive;
+
+        // under the lock: the check begun, sent at once, or of TCP, once its connection is made
+        private void Check(IceCandidatePair pair, DateTime now, List<Outgoing> sends, List<IceCandidatePair> connects)
+        {
+            byte[] bytes = BeginCheck(pair, now);
+            if (pair.IsTcp && pair.Connection == null)
+                connects.Add(pair);
+            else
+                sends.Add(new Outgoing(pair.Base, pair.Connection, bytes, pair.RemoteEndPoint));
+        }
+
         // under the lock: a check of the pair (RFC 8445 7.2.4), its request kept for its retransmissions
         private byte[] BeginCheck(IceCandidatePair pair, DateTime now)
         {
@@ -592,7 +891,8 @@ namespace SharpICE
 
             var request = new StunMessage(StunMethod.Binding, StunMessageClass.Request);
             request.AddString(StunAttributeType.Username, RemoteUfrag + ":" + LocalUfrag);
-            request.AddUInt32(StunAttributeType.Priority, IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, 65535 - _bases.IndexOf(pair.Base), IceCandidate.RtpComponent));
+            // the priority of the peer reflexive candidate the check may make of the pair's local one (RFC 8445 7.1.1)
+            request.AddUInt32(StunAttributeType.Priority, IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, pair.Local.LocalPreference, IceCandidate.RtpComponent, pair.IsTcp));
             if (Role == IceRole.Controlling)
             {
                 request.AddUInt64(StunAttributeType.IceControlling, TieBreaker);
@@ -613,7 +913,11 @@ namespace SharpICE
             pair.TransactionId = request.TransactionId;
             pair.Transmissions = 1;
             pair.Timeout = _options.InitialRetransmissionTimeout;
-            pair.NextTransmission = now + pair.Timeout;
+            pair.CheckStarted = now;
+            // of TCP, the whole of the time UDP's retransmissions would take, at once
+            pair.NextTransmission = now + (pair.IsTcp
+                ? TimeSpan.FromTicks(_options.InitialRetransmissionTimeout.Ticks * ((1L << _options.MaxTransmissions) - 1))
+                : pair.Timeout);
             // of a pair that worked too - its consent, or its nomination - which goes back to it if no answer comes
             pair.State = IceCandidatePairState.InProgress;
             _transactions[Key(request.TransactionId)] = pair;
@@ -653,7 +957,7 @@ namespace SharpICE
 
                     try
                     {
-                        OnDatagram(local, local.Buffer, result.ReceivedBytes, (IPEndPoint)result.RemoteEndPoint);
+                        OnDatagram(local, null, local.Buffer, 0, result.ReceivedBytes, (IPEndPoint)result.RemoteEndPoint);
                     }
                     catch (Exception ex)
                     {
@@ -663,48 +967,73 @@ namespace SharpICE
             });
         }
 
-        private void OnDatagram(LocalBase local, byte[] buffer, int count, IPEndPoint from)
+        // a datagram of a socket of UDP, or a frame of a connection of TCP
+        private void OnDatagram(LocalBase local, IceTcpConnection connection, byte[] buffer, int offset, int count, IPEndPoint from)
         {
             from = Normalize(from);
-            if (StunMessage.IsStun(new ReadOnlySpan<byte>(buffer, 0, count)))
+            if (StunMessage.IsStun(new ReadOnlySpan<byte>(buffer, offset, count)))
             {
-                var message = StunMessage.Parse(buffer, 0, count);
+                var message = StunMessage.Parse(buffer, offset, count);
                 if (message == null)
                     return;
                 if (message.Class == StunMessageClass.Request && message.Method == StunMethod.Binding)
-                    OnBindingRequest(local, message, from);
+                    OnBindingRequest(local, connection, message, from);
                 else if (message.Class == StunMessageClass.SuccessResponse || message.Class == StunMessageClass.ErrorResponse)
-                    OnResponse(local, message, from);
+                    OnResponse(local, connection, message, from);
                 // an indication - a keepalive (RFC 8445 11) - asks for nothing
                 return;
             }
 
-            // DTLS, RTP, RTCP: of a peer whose candidate is known, or whose checks were
+            // DTLS, RTP, RTCP: of a peer whose candidate is known, or whose checks were; or of the pair a restart left selected
             bool known;
             lock (_sync)
-                known = _pairs.Any(p => p.Base == local && p.RemoteEndPoint.Equals(from));
+            {
+                var selected = SelectedPair;
+                known = connection != null
+                    ? selected?.Connection == connection || _pairs.Any(p => p.Connection == connection)
+                    : selected != null && selected.Connection == null && selected.Base == local && selected.RemoteEndPoint.Equals(from)
+                        || _pairs.Any(p => p.Base == local && p.Connection == null && p.RemoteEndPoint.Equals(from));
+            }
             if (known)
-                DataReceived?.Invoke(this, new IceDataReceivedEventArgs(buffer, 0, count, from));
+                DataReceived?.Invoke(this, new IceDataReceivedEventArgs(buffer, offset, count, from));
         }
 
         // an IPv4 address mapped to IPv6, of a dual socket, as the IPv4 address it is
-        private static IPEndPoint Normalize(IPEndPoint endPoint)
+        internal static IPEndPoint Normalize(IPEndPoint endPoint)
             => endPoint.Address.IsIPv4MappedToIPv6 ? new IPEndPoint(endPoint.Address.MapToIPv4(), endPoint.Port) : endPoint;
 
-        private void OnBindingRequest(LocalBase local, StunMessage request, IPEndPoint from)
+        private void OnBindingRequest(LocalBase local, IceTcpConnection connection, StunMessage request, IPEndPoint from)
         {
             // RFC 8445 7.3: of the username of our ufrag first, signed with our password
             if (!request.HasFingerprint || !request.VerifyFingerprint())
                 return;
             string username = request.Username;
-            if (username == null || !username.StartsWith(LocalUfrag + ":", StringComparison.Ordinal))
+            string localUfrag, localPassword;
+            lock (_sync)
             {
-                SendError(local, request, from, StunErrorCode.BadRequest, "Bad Request", false);
+                localUfrag = LocalUfrag;
+                localPassword = LocalPassword;
+            }
+            byte[] localKey = StunMessage.ShortTermKey(localPassword);
+            if (username == null || !username.StartsWith(localUfrag + ":", StringComparison.Ordinal))
+            {
+                SendError(local, connection, request, from, StunErrorCode.BadRequest, "Bad Request", null);
                 return;
             }
-            if (!request.VerifyIntegrity(StunMessage.ShortTermKey(LocalPassword)))
+            if (!request.VerifyIntegrity(localKey))
             {
-                SendError(local, request, from, StunErrorCode.Unauthorized, "Unauthorized", false);
+                SendError(local, connection, request, from, StunErrorCode.Unauthorized, "Unauthorized", null);
+                return;
+            }
+
+            // of an attribute it is not to be understood without, a 420 that lists them (RFC 8489 6.3.1.1)
+            var unknown = request.GetUnknownComprehensionRequired();
+            if (unknown.Count > 0)
+            {
+                var error = new StunMessage(StunMethod.Binding, StunMessageClass.ErrorResponse, request.TransactionId)
+                    .AddError(StunErrorCode.UnknownAttribute, "Unknown Attribute")
+                    .AddUnknownAttributes(unknown);
+                SendStun(new Outgoing(local, connection, error.ToBytes(localKey), from));
                 return;
             }
 
@@ -715,14 +1044,15 @@ namespace SharpICE
                 if (_closed)
                     return;
 
-                // RFC 8445 7.3.1.1: of both controlling, or both controlled, the greater tie-breaker controls
+                // RFC 8445 7.3.1.1: of both controlling, or both controlled, the greater tie-breaker controls; a lite agent
+                // never does
                 ulong? controlling = request.IceControlling;
                 ulong? controlled = request.IceControlled;
                 if (Role == IceRole.Controlling && controlling != null)
                 {
                     if (TieBreaker >= controlling.Value)
                     {
-                        SendError(local, request, from, StunErrorCode.RoleConflict, "Role Conflict", true);
+                        SendError(local, connection, request, from, StunErrorCode.RoleConflict, "Role Conflict", localKey);
                         return;
                     }
                     SwitchRole(IceRole.Controlled);
@@ -730,61 +1060,75 @@ namespace SharpICE
                 }
                 else if (Role == IceRole.Controlled && controlled != null)
                 {
-                    if (TieBreaker >= controlled.Value)
+                    if (TieBreaker >= controlled.Value && !IsLite)
                     {
                         SwitchRole(IceRole.Controlling);
                         roleChanged = true;
                     }
                     else
                     {
-                        SendError(local, request, from, StunErrorCode.RoleConflict, "Role Conflict", true);
+                        SendError(local, connection, request, from, StunErrorCode.RoleConflict, "Role Conflict", localKey);
                         return;
                     }
                 }
 
-                // a candidate the peer did not signal - a peer reflexive one (RFC 8445 7.3.1.3)
-                var remote = _remoteCandidates.FirstOrDefault(c => Equals(c.EndPoint, from));
+                // a candidate the peer did not signal - a peer reflexive one (RFC 8445 7.3.1.3); over TCP, the active one of
+                // the connection it made
+                bool tcp = connection != null;
+                var remote = _remoteCandidates.FirstOrDefault(c => c.IsTcp == tcp && Equals(c.EndPoint, from));
                 if (remote == null)
                 {
                     remote = new IceCandidate
                     {
                         Foundation = "p" + (_remoteCandidates.Count + 1).ToString(CultureInfo.InvariantCulture),
                         Component = IceCandidate.RtpComponent,
-                        Transport = "udp",
-                        Priority = request.Priority ?? IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, 0, IceCandidate.RtpComponent),
+                        Transport = tcp ? "tcp" : "udp",
+                        Priority = request.Priority ?? IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, 0, IceCandidate.RtpComponent, tcp),
                         Address = from.Address.ToString(),
                         Port = from.Port,
                         Type = IceCandidateType.PeerReflexive,
                     };
+                    if (tcp)
+                        remote.TcpType = IceCandidate.TcpActive;
                     _remoteCandidates.Add(remote);
                     Trace($"Peer reflexive {remote}");
                 }
 
-                var pair = _pairs.FirstOrDefault(p => p.Base == local && p.RemoteEndPoint.Equals(from));
+                var pair = tcp
+                    ? _pairs.FirstOrDefault(p => p.Connection == connection)
+                    : _pairs.FirstOrDefault(p => p.Base == local && p.Connection == null && p.RemoteEndPoint.Equals(from));
                 if (pair == null)
                 {
-                    pair = new IceCandidatePair(local, remote, from);
+                    pair = new IceCandidatePair(local, remote, from) { Connection = connection };
                     pair.Priority = PairPriority(pair);
                     _pairs.Add(pair);
                 }
                 pair.LastConsent = DateTime.UtcNow;
 
                 // a triggered check (RFC 8445 7.3.1.4), of a pair not known to work
-                if (_started && pair.State != IceCandidatePairState.Succeeded && pair.State != IceCandidatePairState.InProgress && !_triggered.Contains(pair))
+                if (!IsLite && _started && pair.State != IceCandidatePairState.Succeeded && pair.State != IceCandidatePairState.InProgress && !_triggered.Contains(pair))
                 {
-                    if (pair.State == IceCandidatePairState.Failed)
+                    if (pair.State == IceCandidatePairState.Failed || pair.State == IceCandidatePairState.Frozen)
                         pair.State = IceCandidatePairState.Waiting;
                     _triggered.AddLast(pair);
                 }
 
-                // nominated by the controlling agent (RFC 8445 7.3.1.5): selected once a check of ours on it succeeds too
+                // nominated by the controlling agent (RFC 8445 7.3.1.5): selected once a check of ours on it succeeds too; of a
+                // lite agent, which checks nothing, as it is
                 if (Role == IceRole.Controlled && request.UseCandidate)
                 {
                     if (!pair.Nominated)
                         Trace($"Nominated by the peer: {pair}");
                     pair.Nominated = true;
-                    if (pair.LastSucceeded > DateTime.MinValue)
+                    if (IsLite)
+                    {
+                        pair.State = IceCandidatePairState.Succeeded;
                         selectedNow = Select(pair);
+                    }
+                    else if (pair.LastSucceeded > DateTime.MinValue)
+                    {
+                        selectedNow = Select(pair);
+                    }
                 }
             }
 
@@ -792,18 +1136,18 @@ namespace SharpICE
             response.AddXorAddress(from);
             if (_options.Software != null)
                 response.AddString(StunAttributeType.Software, _options.Software);
-            Send(local, response.ToBytes(StunMessage.ShortTermKey(LocalPassword)), from);
+            SendStun(new Outgoing(local, connection, response.ToBytes(localKey), from));
 
             if (roleChanged)
                 Trace($"Role switched to {Role}");
             AfterSelect(selectedNow);
         }
 
-        private void SendError(LocalBase local, StunMessage request, IPEndPoint to, int code, string reason, bool signed)
+        private void SendError(LocalBase local, IceTcpConnection connection, StunMessage request, IPEndPoint to, int code, string reason, byte[] key)
         {
             var response = new StunMessage(StunMethod.Binding, StunMessageClass.ErrorResponse, request.TransactionId);
             response.AddError(code, reason);
-            Send(local, response.ToBytes(signed ? StunMessage.ShortTermKey(LocalPassword) : null), to);
+            SendStun(new Outgoing(local, connection, response.ToBytes(key), to));
         }
 
         // under the lock
@@ -814,7 +1158,7 @@ namespace SharpICE
                 pair.Priority = PairPriority(pair);
         }
 
-        private void OnResponse(LocalBase local, StunMessage response, IPEndPoint from)
+        private void OnResponse(LocalBase local, IceTcpConnection connection, StunMessage response, IPEndPoint from)
         {
             string key = Key(response.TransactionId);
             TaskCompletionSource<IPEndPoint> gathering;
@@ -824,7 +1168,8 @@ namespace SharpICE
             {
                 if (response.HasFingerprint && !response.VerifyFingerprint())
                     return;
-                gathering.TrySetResult(StunClient.GetMappedAddress(response));
+                // of an attribute it is not to be understood without, the transaction failed (RFC 8489 6.3.3)
+                gathering.TrySetResult(response.GetUnknownComprehensionRequired().Count > 0 ? null : StunClient.GetMappedAddress(response));
                 return;
             }
 
@@ -837,13 +1182,15 @@ namespace SharpICE
                 if (!response.HasFingerprint || !response.VerifyFingerprint() || !response.VerifyIntegrity(_remoteKey))
                     return;
                 _transactions.Remove(key);
-                if (pair.Base != local || !pair.RemoteEndPoint.Equals(from))
+                bool symmetric = pair.Base == local && (connection != null ? pair.Connection == connection : pair.RemoteEndPoint.Equals(from));
+                if (!symmetric)
                 {
                     pair.State = IceCandidatePairState.Failed;
                     return;
                 }
 
-                if (response.Class == StunMessageClass.ErrorResponse)
+                // of an attribute it is not to be understood without, the check failed as of an error (RFC 8489 6.3.3)
+                if (response.Class == StunMessageClass.ErrorResponse || response.GetUnknownComprehensionRequired().Count > 0)
                 {
                     var error = response.Error;
                     if (error?.Code == StunErrorCode.RoleConflict)
@@ -865,6 +1212,13 @@ namespace SharpICE
                 pair.State = IceCandidatePairState.Succeeded;
                 pair.LastConsent = pair.LastSucceeded = DateTime.UtcNow;
                 Trace($"Check succeeded: {pair}");
+
+                // the pairs of its foundation unfrozen (RFC 8445 7.2.5.3.3)
+                foreach (var other in _pairs)
+                {
+                    if (other.State == IceCandidatePairState.Frozen && other.Foundation == pair.Foundation)
+                        other.State = IceCandidatePairState.Waiting;
+                }
 
                 if (Role == IceRole.Controlling)
                 {
@@ -914,27 +1268,36 @@ namespace SharpICE
 
         #region Sending
 
-        private void Send(LocalBase local, byte[] bytes, IPEndPoint to)
+        private void SendStun(Outgoing outgoing)
         {
+            if (outgoing.Connection != null)
+            {
+                outgoing.Connection.Send(outgoing.Bytes, 0, outgoing.Bytes.Length);
+                return;
+            }
+            if (outgoing.Base.Socket == null)
+                return;
             try
             {
-                local.Socket.SendTo(bytes, 0, bytes.Length, SocketFlags.None, to);
+                outgoing.Base.Socket.SendTo(outgoing.Bytes, 0, outgoing.Bytes.Length, SocketFlags.None, outgoing.To);
             }
             catch (ObjectDisposedException)
             {
             }
             catch (SocketException ex)
             {
-                Trace($"Send to {to} failed: {ex.SocketErrorCode}");
+                Trace($"Send to {outgoing.To} failed: {ex.SocketErrorCode}");
             }
         }
 
-        /// <summary>Sends a datagram on the selected pair. False of none selected yet, or of one that failed.</summary>
+        /// <summary>Sends a datagram on the selected pair - of TCP, framed (RFC 4571). False of none selected yet, or of one that failed.</summary>
         public bool Send(byte[] buffer, int offset, int count)
         {
             var pair = SelectedPair;
             if (pair == null || _closed || State == IceConnectionState.Failed)
                 return false;
+            if (pair.IsTcp)
+                return pair.Connection?.Send(buffer, offset, count) == true;
             try
             {
                 pair.Base.Socket.SendTo(buffer, offset, count, SocketFlags.None, pair.RemoteEndPoint);
@@ -967,15 +1330,23 @@ namespace SharpICE
 
         public void Close()
         {
+            List<IceTcpConnection> connections;
             lock (_sync)
             {
                 if (_closed)
                     return;
                 _closed = true;
+                connections = _connections.ToList();
+                _connections.Clear();
             }
             _timer?.Dispose();
             foreach (var local in _bases)
-                local.Socket.Dispose();
+            {
+                local.Socket?.Dispose();
+                local.Listener?.Stop();
+            }
+            foreach (var connection in connections)
+                connection.Dispose();
             foreach (var gathering in _gatherings.Values.ToList())
                 gathering.TrySetResult(null);
             SetState(IceConnectionState.Closed);

@@ -73,14 +73,40 @@ namespace SharpStunClient
         public const ushort XorRelayedAddress = 0x0016;
         public const ushort RequestedTransport = 0x0019;
         public const ushort MessageIntegritySha256 = 0x001C;
+        public const ushort PasswordAlgorithm = 0x001D;
+        public const ushort Userhash = 0x001E;
         public const ushort XorMappedAddress = 0x0020;
         public const ushort Priority = 0x0024;
         public const ushort UseCandidate = 0x0025;
+        public const ushort PasswordAlgorithms = 0x8002;
+        public const ushort AlternateDomain = 0x8003;
         public const ushort Software = 0x8022;
         public const ushort AlternateServer = 0x8023;
         public const ushort Fingerprint = 0x8028;
         public const ushort IceControlled = 0x8029;
         public const ushort IceControlling = 0x802A;
+
+        private static readonly HashSet<ushort> Known = new HashSet<ushort>
+        {
+            MappedAddress, Username, MessageIntegrity, ErrorCode, UnknownAttributes, ChannelNumber, Lifetime, XorPeerAddress, Data,
+            Realm, Nonce, XorRelayedAddress, RequestedTransport, MessageIntegritySha256, PasswordAlgorithm, Userhash, XorMappedAddress,
+            Priority, UseCandidate, PasswordAlgorithms, AlternateDomain, Software, AlternateServer, Fingerprint, IceControlled, IceControlling,
+        };
+
+        /// <summary>Whether the attribute is one of these, which this library reads.</summary>
+        public static bool IsKnown(ushort type) => Known.Contains(type);
+    }
+
+    /// <summary>
+    /// The integrity a message is signed with (RFC 8489 14.5, 14.6): its MESSAGE-INTEGRITY of HMAC-SHA1, its
+    /// MESSAGE-INTEGRITY-SHA256, or both, in that order.
+    /// </summary>
+    [Flags]
+    public enum StunIntegrity
+    {
+        None = 0,
+        Sha1 = 1,
+        Sha256 = 2
     }
 
     /// <summary>
@@ -88,6 +114,7 @@ namespace SharpStunClient
     /// </summary>
     public static class StunErrorCode
     {
+        public const int TryAlternate = 300;
         public const int BadRequest = 400;
         public const int Unauthorized = 401;
         public const int UnknownAttribute = 420;
@@ -132,9 +159,11 @@ namespace SharpStunClient
         // RFC 8489 14.7: the CRC-32 of the message, XOR-ed with this
         private const uint FingerprintXor = 0x5354554E;
         private const int IntegrityLength = 20;
+        private const int IntegritySha256Length = 32;
 
         private byte[] _raw;
         private int _integrityOffset = -1;
+        private int _integritySha256Offset = -1;
         private int _fingerprintOffset = -1;
 
         public ushort Method { get; set; }
@@ -204,24 +233,47 @@ namespace SharpStunClient
                 if (position + 4 + length > count)
                     return null;
 
-                // what follows MESSAGE-INTEGRITY is FINGERPRINT alone, and nothing FINGERPRINT (RFC 8489 14.5, 14.7)
+                // what follows MESSAGE-INTEGRITY is MESSAGE-INTEGRITY-SHA256 and FINGERPRINT alone, what follows
+                // MESSAGE-INTEGRITY-SHA256 FINGERPRINT alone, and nothing FINGERPRINT (RFC 8489 14.5, 14.6, 14.7)
                 if (message._fingerprintOffset >= 0)
                     return null;
+                bool ignored;
                 if (attributeType == StunAttributeType.MessageIntegrity)
                 {
-                    if (length != IntegrityLength)
-                        return null;
-                    message._integrityOffset = position;
+                    ignored = message._integrityOffset >= 0 || message._integritySha256Offset >= 0;
+                    if (!ignored)
+                    {
+                        if (length != IntegrityLength)
+                            return null;
+                        message._integrityOffset = position;
+                    }
+                }
+                else if (attributeType == StunAttributeType.MessageIntegritySha256)
+                {
+                    ignored = message._integritySha256Offset >= 0;
+                    if (!ignored)
+                    {
+                        // 16 to 32 bytes, a multiple of 4: of a usage that truncates it, less than its 32
+                        if (length < 16 || length > IntegritySha256Length || (length & 3) != 0)
+                            return null;
+                        message._integritySha256Offset = position;
+                    }
                 }
                 else if (attributeType == StunAttributeType.Fingerprint)
                 {
+                    ignored = false;
                     if (length != 4)
                         return null;
                     message._fingerprintOffset = position;
                 }
-                else if (message._integrityOffset >= 0)
+                else
                 {
-                    // after the integrity, of no integrity itself: left out, as RFC 8489 14.5 says to ignore it
+                    ignored = message._integrityOffset >= 0 || message._integritySha256Offset >= 0;
+                }
+
+                if (ignored)
+                {
+                    // after the integrity, of no integrity itself: left out, as RFC 8489 14.5 and 14.6 say to ignore it
                     position += 4 + ((length + 3) & ~3);
                     continue;
                 }
@@ -233,6 +285,8 @@ namespace SharpStunClient
         }
 
         public bool HasIntegrity => _integrityOffset >= 0;
+
+        public bool HasIntegritySha256 => _integritySha256Offset >= 0;
 
         public bool HasFingerprint => _fingerprintOffset >= 0;
 
@@ -257,16 +311,44 @@ namespace SharpStunClient
         {
             if (_raw == null || _integrityOffset < 0 || key == null)
                 return false;
-            byte[] signed = new byte[_integrityOffset];
-            Buffer.BlockCopy(_raw, 0, signed, 0, _integrityOffset);
-            BinaryPrimitives.WriteUInt16BigEndian(signed.AsSpan(2), (ushort)(_integrityOffset - HeaderLength + 4 + IntegrityLength));
-            byte[] hmac;
-            using (var sha1 = new HMACSHA1(key))
-                hmac = sha1.ComputeHash(signed);
-            return FixedTimeEquals(hmac, _raw.AsSpan(_integrityOffset + 4, IntegrityLength));
+            return VerifyHmac(_integrityOffset, IntegrityLength, key, false);
         }
 
-        private static bool FixedTimeEquals(byte[] a, ReadOnlySpan<byte> b)
+        /// <summary>
+        /// Whether its MESSAGE-INTEGRITY-SHA256 is the HMAC-SHA256 of the message before it, of the key given (RFC 8489 14.6) -
+        /// as many of its first bytes as the attribute has. False of a message that was not read, or has none.
+        /// </summary>
+        public bool VerifyIntegritySha256(byte[] key)
+        {
+            if (_raw == null || _integritySha256Offset < 0 || key == null)
+                return false;
+            int length = BinaryPrimitives.ReadUInt16BigEndian(_raw.AsSpan(_integritySha256Offset + 2));
+            return VerifyHmac(_integritySha256Offset, length, key, true);
+        }
+
+        /// <summary>
+        /// Whether the strongest integrity it has is of the key given: its MESSAGE-INTEGRITY-SHA256 if it has one, else its
+        /// MESSAGE-INTEGRITY. False of a message of neither.
+        /// </summary>
+        public bool VerifyAnyIntegrity(byte[] key) => HasIntegritySha256 ? VerifyIntegritySha256(key) : VerifyIntegrity(key);
+
+        // the HMAC of the message up to the attribute at the offset, its header's length to the end of the attribute
+        private bool VerifyHmac(int offset, int length, byte[] key, bool sha256)
+        {
+            byte[] signed = new byte[offset];
+            Buffer.BlockCopy(_raw, 0, signed, 0, offset);
+            BinaryPrimitives.WriteUInt16BigEndian(signed.AsSpan(2), (ushort)(offset - HeaderLength + 4 + length));
+            byte[] hmac = ComputeHmac(key, signed, signed.Length, sha256);
+            return FixedTimeEquals(hmac.AsSpan(0, length), _raw.AsSpan(offset + 4, length));
+        }
+
+        private static byte[] ComputeHmac(byte[] key, byte[] bytes, int count, bool sha256)
+        {
+            using (HMAC hmac = sha256 ? new HMACSHA256(key) : (HMAC)new HMACSHA1(key))
+                return hmac.ComputeHash(bytes, 0, count);
+        }
+
+        private static bool FixedTimeEquals(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)
         {
             if (a.Length != b.Length)
                 return false;
@@ -284,13 +366,29 @@ namespace SharpStunClient
         /// and its FINGERPRINT, if it is to have one.
         /// </summary>
         public byte[] ToBytes(byte[] integrityKey = null, bool fingerprint = true)
+            => ToBytes(integrityKey, integrityKey == null ? StunIntegrity.None : StunIntegrity.Sha1, fingerprint);
+
+        /// <summary>
+        /// The message's bytes: its header, its attributes each padded to 4 bytes, then the integrity given of the key - its
+        /// MESSAGE-INTEGRITY, its MESSAGE-INTEGRITY-SHA256 of all 32 bytes, or both, in that order - and its FINGERPRINT, if it
+        /// is to have one.
+        /// </summary>
+        public byte[] ToBytes(byte[] integrityKey, StunIntegrity integrity, bool fingerprint = true)
         {
+            if (integrityKey == null)
+                integrity = StunIntegrity.None;
+            bool sha1 = (integrity & StunIntegrity.Sha1) != 0;
+            bool sha256 = (integrity & StunIntegrity.Sha256) != 0;
+
             int length = 0;
             foreach (var attribute in Attributes)
                 length += 4 + ((attribute.Value.Length + 3) & ~3);
             int integrityAt = HeaderLength + length;
-            if (integrityKey != null)
+            if (sha1)
                 length += 4 + IntegrityLength;
+            int integritySha256At = HeaderLength + length;
+            if (sha256)
+                length += 4 + IntegritySha256Length;
             int fingerprintAt = HeaderLength + length;
             if (fingerprint)
                 length += 8;
@@ -309,16 +407,24 @@ namespace SharpStunClient
                 position += 4 + ((attribute.Value.Length + 3) & ~3);
             }
 
-            if (integrityKey != null)
+            if (sha1)
             {
                 // the length of the message to the end of the integrity, as it is signed
                 BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(2), (ushort)(integrityAt - HeaderLength + 4 + IntegrityLength));
-                byte[] hmac;
-                using (var sha1 = new HMACSHA1(integrityKey))
-                    hmac = sha1.ComputeHash(bytes, 0, integrityAt);
+                byte[] hmac = ComputeHmac(integrityKey, bytes, integrityAt, false);
                 BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(integrityAt), StunAttributeType.MessageIntegrity);
                 BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(integrityAt + 2), IntegrityLength);
                 Buffer.BlockCopy(hmac, 0, bytes, integrityAt + 4, IntegrityLength);
+            }
+
+            if (sha256)
+            {
+                // of the message up to it, its MESSAGE-INTEGRITY among it
+                BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(2), (ushort)(integritySha256At - HeaderLength + 4 + IntegritySha256Length));
+                byte[] hmac = ComputeHmac(integrityKey, bytes, integritySha256At, true);
+                BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(integritySha256At), StunAttributeType.MessageIntegritySha256);
+                BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(integritySha256At + 2), IntegritySha256Length);
+                Buffer.BlockCopy(hmac, 0, bytes, integritySha256At + 4, IntegritySha256Length);
             }
 
             BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(2), (ushort)length);
@@ -437,6 +543,136 @@ namespace SharpStunClient
             value[3] = (byte)(code % 100);
             Buffer.BlockCopy(text, 0, value, 4, text.Length);
             return AddAttribute(StunAttributeType.ErrorCode, value);
+        }
+
+        /// <summary>The attributes of the type, in their order: of one that may be there more than once, ALTERNATE-SERVER.</summary>
+        public IEnumerable<StunAttribute> GetAttributes(ushort type)
+        {
+            foreach (var attribute in Attributes)
+            {
+                if (attribute.Type == type)
+                    yield return attribute;
+            }
+        }
+
+        public string Realm => GetString(StunAttributeType.Realm);
+
+        public string Nonce => GetString(StunAttributeType.Nonce);
+
+        /// <summary>
+        /// The servers of its ALTERNATE-SERVER attributes (RFC 8489 14.15): one of the address family of the request it answers,
+        /// and maybe one of the other.
+        /// </summary>
+        public List<IPEndPoint> AlternateServers
+        {
+            get
+            {
+                var servers = new List<IPEndPoint>();
+                foreach (var attribute in GetAttributes(StunAttributeType.AlternateServer))
+                {
+                    var server = DecodeAddress(attribute.Value, TransactionId, false);
+                    if (server != null)
+                        servers.Add(server);
+                }
+                return servers;
+            }
+        }
+
+        /// <summary>The name an alternate server's certificate is of (RFC 8489 14.16).</summary>
+        public string AlternateDomain => GetString(StunAttributeType.AlternateDomain);
+
+        /// <summary>An address as it is, not XOR-ed: a MAPPED-ADDRESS, or an ALTERNATE-SERVER.</summary>
+        public StunMessage AddAddress(IPEndPoint endPoint, ushort type)
+            => AddAttribute(type, EncodeAddress(endPoint, TransactionId, false));
+
+        /// <summary>
+        /// The algorithms of a PASSWORD-ALGORITHMS (RFC 8489 14.11), in the server's order of preference, their parameters left
+        /// out; empty of a message of none.
+        /// </summary>
+        public List<ushort> PasswordAlgorithms
+        {
+            get
+            {
+                var algorithms = new List<ushort>();
+                var attribute = GetAttribute(StunAttributeType.PasswordAlgorithms);
+                if (attribute == null)
+                    return algorithms;
+                int position = 0;
+                while (position + 4 <= attribute.Value.Length)
+                {
+                    algorithms.Add(BinaryPrimitives.ReadUInt16BigEndian(attribute.Value.AsSpan(position)));
+                    int length = BinaryPrimitives.ReadUInt16BigEndian(attribute.Value.AsSpan(position + 2));
+                    position += 4 + ((length + 3) & ~3);
+                }
+                return algorithms;
+            }
+        }
+
+        public StunMessage AddPasswordAlgorithms(params StunPasswordAlgorithm[] algorithms)
+        {
+            byte[] value = new byte[4 * algorithms.Length];
+            for (int i = 0; i < algorithms.Length; i++)
+                BinaryPrimitives.WriteUInt16BigEndian(value.AsSpan(4 * i), (ushort)algorithms[i]);
+            return AddAttribute(StunAttributeType.PasswordAlgorithms, value);
+        }
+
+        /// <summary>The algorithm of a PASSWORD-ALGORITHM (RFC 8489 14.12); null of a message of none.</summary>
+        public ushort? PasswordAlgorithm
+        {
+            get
+            {
+                var attribute = GetAttribute(StunAttributeType.PasswordAlgorithm);
+                return attribute == null || attribute.Value.Length < 4 ? (ushort?)null : BinaryPrimitives.ReadUInt16BigEndian(attribute.Value);
+            }
+        }
+
+        public StunMessage AddPasswordAlgorithm(StunPasswordAlgorithm algorithm)
+        {
+            byte[] value = new byte[4];
+            BinaryPrimitives.WriteUInt16BigEndian(value, (ushort)algorithm);
+            return AddAttribute(StunAttributeType.PasswordAlgorithm, value);
+        }
+
+        /// <summary>The types an UNKNOWN-ATTRIBUTES lists (RFC 8489 14.13): of a 420 (Unknown Attribute).</summary>
+        public List<ushort> UnknownAttributeTypes
+        {
+            get
+            {
+                var types = new List<ushort>();
+                var attribute = GetAttribute(StunAttributeType.UnknownAttributes);
+                if (attribute != null)
+                {
+                    for (int i = 0; i + 2 <= attribute.Value.Length; i += 2)
+                        types.Add(BinaryPrimitives.ReadUInt16BigEndian(attribute.Value.AsSpan(i)));
+                }
+                return types;
+            }
+        }
+
+        public StunMessage AddUnknownAttributes(IEnumerable<ushort> types)
+        {
+            var list = new List<ushort>(types);
+            byte[] value = new byte[2 * list.Count];
+            for (int i = 0; i < list.Count; i++)
+                BinaryPrimitives.WriteUInt16BigEndian(value.AsSpan(2 * i), list[i]);
+            return AddAttribute(StunAttributeType.UnknownAttributes, value);
+        }
+
+        /// <summary>
+        /// The types of its comprehension-required attributes the reader does not know (RFC 8489 6.3), once each: of a request
+        /// they are answered with a 420 (Unknown Attribute) that lists them, a response of them ends its transaction, and an
+        /// indication of them is dropped. Of no reader given, those this library knows (<see cref="StunAttributeType.IsKnown"/>).
+        /// </summary>
+        public List<ushort> GetUnknownComprehensionRequired(Func<ushort, bool> isKnown = null)
+        {
+            isKnown ??= StunAttributeType.IsKnown;
+            var unknown = new List<ushort>();
+            foreach (var attribute in Attributes)
+            {
+                if (attribute.IsComprehensionRequired && !isKnown(attribute.Type) && !unknown.Contains(attribute.Type))
+                    unknown.Add(attribute.Type);
+            }
+            return unknown;
         }
 
         private static IPEndPoint DecodeAddress(byte[] value, byte[] transactionId, bool xor)
