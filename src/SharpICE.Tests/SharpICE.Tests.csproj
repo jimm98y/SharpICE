@@ -16,6 +16,8 @@
     <ProjectReference Include="..\SharpStunClient\SharpStunClient.csproj" />
     <ProjectReference Include="..\SharpICE\SharpICE.csproj" />
     <ProjectReference Include="..\SharpStunServer\SharpStunServer.csproj" />
+    <ProjectReference Include="..\SharpTurnClient\SharpTurnClient.csproj" />
+    <ProjectReference Include="..\SharpTurnServer\SharpTurnServer.csproj" />
   </ItemGroup>
 
   <ItemGroup>

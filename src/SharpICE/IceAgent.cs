@@ -20,6 +20,7 @@
 // SOFTWARE.
 
 using SharpStunClient;
+using SharpTurnClient;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -98,9 +99,11 @@ namespace SharpICE
 
         internal sealed class LocalBase
         {
-            // of UDP, the socket; of a passive candidate of TCP, the listener; of an active one, neither
+            // of UDP, the socket; of a passive candidate of TCP, the listener; of an active one, neither; of a relayed one, its
+            // allocation's client
             public Socket Socket;
             public TcpListener Listener;
+            public TurnClient Turn;
 
             // the socket's or the listener's; of an active candidate of TCP, its address and port 9
             public IPEndPoint EndPoint;
@@ -136,6 +139,7 @@ namespace SharpICE
         private readonly LinkedList<IceCandidatePair> _triggered = new LinkedList<IceCandidatePair>();
         private readonly Dictionary<string, IceCandidatePair> _transactions = new Dictionary<string, IceCandidatePair>();
         private readonly List<IceTcpConnection> _connections = new List<IceTcpConnection>();
+        private readonly List<TurnClient> _turns = new List<TurnClient>();
         private readonly Random _random = new Random();
 
         // the requests of gathering, each the base it was sent from and what is waiting for its answer
@@ -360,7 +364,7 @@ namespace SharpICE
                     _mdns = responder;
                 }
             }
-            if (_options.IncludeUdp)
+            if (_options.IncludeUdp && !_options.RelayOnly)
             {
                 for (int i = 0; i < addresses.Count; i++)
                 {
@@ -392,12 +396,14 @@ namespace SharpICE
                 }
             }
 
-            if (_options.IncludeTcp)
+            if (_options.IncludeTcp && !_options.RelayOnly)
                 GatherTcp(addresses, gathered);
 
             // a lite agent is of host candidates alone (RFC 8445 2.5)
-            if (_options.IncludeUdp && !IsLite)
+            if (_options.IncludeUdp && !IsLite && !_options.RelayOnly)
                 await GatherServerReflexiveAsync(gathered, cancellationToken).ConfigureAwait(false);
+            if (!IsLite)
+                await GatherRelayedAsync(gathered, cancellationToken).ConfigureAwait(false);
             return gathered;
         }
 
@@ -460,6 +466,88 @@ namespace SharpICE
                 gathered.Add(candidate);
                 Trace($"Gathered {candidate}");
                 CandidateGathered?.Invoke(this, candidate);
+            }
+        }
+
+        // a relayed candidate of each TURN server's allocation (RFC 8445 5.1.1.2), of its mapped address as its related one
+        private async Task GatherRelayedAsync(List<IceCandidate> gathered, CancellationToken cancellationToken)
+        {
+            if (_options.TurnServers.Count == 0)
+                return;
+            var allocations = await Task.WhenAll(_options.TurnServers.Select(server => AllocateAsync(server, cancellationToken))).ConfigureAwait(false);
+            int index = 0;
+            foreach (var turn in allocations)
+            {
+                if (turn == null)
+                    continue;
+                foreach (var relayed in turn.RelayedEndPoints)
+                {
+                    var candidate = new IceCandidate
+                    {
+                        Foundation = "r" + (++index).ToString(CultureInfo.InvariantCulture),
+                        Component = IceCandidate.RtpComponent,
+                        Transport = "udp",
+                        Priority = IceCandidate.ComputePriority(IceCandidateType.Relayed, 65535 - index, IceCandidate.RtpComponent),
+                        Address = relayed.Address.ToString(),
+                        Port = relayed.Port,
+                        Type = IceCandidateType.Relayed,
+                        // of mDNS candidates, no address of the host's
+                        RelatedAddress = _mdns != null || turn.MappedEndPoint == null ? "0.0.0.0" : turn.MappedEndPoint.Address.ToString(),
+                        RelatedPort = _mdns != null || turn.MappedEndPoint == null ? 0 : turn.MappedEndPoint.Port,
+                    };
+                    var local = new LocalBase { Turn = turn, EndPoint = relayed, Candidate = candidate };
+                    turn.DataReceived += (s, e) =>
+                    {
+                        try
+                        {
+                            OnDatagram(local, null, e.Data, 0, e.Data.Length, e.Peer);
+                        }
+                        catch (Exception ex)
+                        {
+                            Trace($"Relayed data from {e.Peer} failed: {ex}");
+                        }
+                    };
+                    AddBase(local, gathered);
+                }
+            }
+        }
+
+        private async Task<TurnClient> AllocateAsync(IceTurnServer server, CancellationToken cancellationToken)
+        {
+            TurnClient turn = null;
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                timeout.CancelAfter(_options.TurnServerTimeout);
+                try
+                {
+                    var options = new StunClientOptions
+                    {
+                        Username = server.Username,
+                        Password = server.Password,
+                        Software = _options.Software,
+                        CertificateValidation = _options.TurnCertificateValidation,
+                        InitialRetransmissionTimeout = _options.InitialRetransmissionTimeout,
+                    };
+                    turn = await TurnClient.ConnectAsync(server.Uri, options, timeout.Token).ConfigureAwait(false);
+                    await turn.AllocateAsync(null, timeout.Token).ConfigureAwait(false);
+                    lock (_sync)
+                    {
+                        if (_closed)
+                        {
+                            turn.Dispose();
+                            return null;
+                        }
+                        _turns.Add(turn);
+                    }
+                    Trace($"Allocated {string.Join(", ", turn.RelayedEndPoints)} of {server.Uri}");
+                    return turn;
+                }
+                catch (Exception ex) when (ex is TurnException || ex is StunException || ex is OperationCanceledException || ex is System.IO.IOException || ex is SocketException || ex is FormatException)
+                {
+                    Trace($"No allocation of {server.Uri}: {ex.Message}");
+                    turn?.Dispose();
+                    return null;
+                }
             }
         }
 
@@ -1300,6 +1388,9 @@ namespace SharpICE
             if (selected == null)
                 return;
             Trace($"Selected {selected}");
+            // of a relayed pair, a channel of its peer: ChannelData of 4 bytes rather than indications of 36 (RFC 8656 12)
+            if (selected.Base.Turn != null)
+                _ = BindChannelAsync(selected.Base.Turn, selected.RemoteEndPoint);
             SelectedPairChanged?.Invoke(this, selected);
             if (State == IceConnectionState.Checking || State == IceConnectionState.New || State == IceConnectionState.Disconnected)
                 SetState(IceConnectionState.Connected);
@@ -1314,6 +1405,11 @@ namespace SharpICE
             if (outgoing.Connection != null)
             {
                 outgoing.Connection.Send(outgoing.Bytes, 0, outgoing.Bytes.Length);
+                return;
+            }
+            if (outgoing.Base.Turn != null)
+            {
+                _ = SendRelayedAsync(outgoing.Base.Turn, outgoing.To, outgoing.Bytes, 0, outgoing.Bytes.Length);
                 return;
             }
             if (outgoing.Base.Socket == null)
@@ -1339,6 +1435,14 @@ namespace SharpICE
                 return false;
             if (pair.IsTcp)
                 return pair.Connection?.Send(buffer, offset, count) == true;
+            if (pair.Base.Turn != null)
+            {
+                // the relay's: the buffer the caller's again at once, a copy of it sent
+                byte[] copy = new byte[count];
+                Buffer.BlockCopy(buffer, offset, copy, 0, count);
+                _ = SendRelayedAsync(pair.Base.Turn, pair.RemoteEndPoint, copy, 0, count);
+                return pair.Base.Turn.IsAllocated;
+            }
             try
             {
                 pair.Base.Socket.SendTo(buffer, offset, count, SocketFlags.None, pair.RemoteEndPoint);
@@ -1355,7 +1459,32 @@ namespace SharpICE
             }
         }
 
+        // through the relay: of a permission of the peer's address installed first, of none yet
+        private async Task SendRelayedAsync(TurnClient turn, IPEndPoint to, byte[] buffer, int offset, int count)
+        {
+            try
+            {
+                await turn.SendAsync(to, buffer, offset, count).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is TurnException || ex is StunException || ex is ObjectDisposedException || ex is SocketException || ex is System.IO.IOException)
+            {
+                Trace($"Relayed send to {to} failed: {ex.Message}");
+            }
+        }
+
         #endregion // Sending
+
+        private async Task BindChannelAsync(TurnClient turn, IPEndPoint peer)
+        {
+            try
+            {
+                await turn.BindChannelAsync(peer).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is TurnException || ex is StunException || ex is ObjectDisposedException || ex is InvalidOperationException)
+            {
+                Trace($"No channel of {peer}: {ex.Message}");
+            }
+        }
 
         private void SetState(IceConnectionState state)
         {
@@ -1372,6 +1501,7 @@ namespace SharpICE
         public void Close()
         {
             List<IceTcpConnection> connections;
+            List<TurnClient> turns;
             lock (_sync)
             {
                 if (_closed)
@@ -1379,6 +1509,8 @@ namespace SharpICE
                 _closed = true;
                 connections = _connections.ToList();
                 _connections.Clear();
+                turns = _turns.ToList();
+                _turns.Clear();
             }
             _timer?.Dispose();
             foreach (var local in _bases)
@@ -1388,6 +1520,9 @@ namespace SharpICE
             }
             foreach (var connection in connections)
                 connection.Dispose();
+            // the allocations deleted, a second each at most
+            foreach (var turn in turns)
+                turn.Dispose();
             _mdns?.Dispose();
             foreach (var gathering in _gatherings.Values.ToList())
                 gathering.TrySetResult(null);

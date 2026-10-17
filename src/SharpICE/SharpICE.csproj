@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SharpStunClient\SharpStunClient.csproj" />
+    <ProjectReference Include="..\SharpTurnClient\SharpTurnClient.csproj" />
   </ItemGroup>
 
 </Project>

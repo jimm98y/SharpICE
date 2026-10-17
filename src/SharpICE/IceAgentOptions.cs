@@ -32,6 +32,15 @@ namespace SharpICE
         Controlled
     }
 
+    /// <summary>A TURN server of the agent's relayed candidates: its URI (RFC 7065), and the long-term credentials of it.</summary>
+    public sealed class IceTurnServer
+    {
+        /// <summary>"turn:host[:port][?transport=udp|tcp]", or "turns:..." of TLS - of DTLS, of "?transport=udp".</summary>
+        public string Uri { get; set; }
+        public string Username { get; set; }
+        public string Password { get; set; }
+    }
+
     public sealed class IceAgentOptions
     {
         /// <summary>
@@ -42,6 +51,21 @@ namespace SharpICE
 
         /// <summary>The STUN servers its server reflexive candidates are learnt of, as "host:port" or "stun:host:port".</summary>
         public List<string> StunServers { get; } = new List<string>();
+
+        /// <summary>The TURN servers its relayed candidates are allocated of (RFC 8656), a relayed address of UDP of each.</summary>
+        public List<IceTurnServer> TurnServers { get; } = new List<IceTurnServer>();
+
+        /// <summary>
+        /// Whether to gather relayed candidates alone, as WebRTC's iceTransportPolicy "relay" does: of no host, server
+        /// reflexive or TCP one, the local addresses not told of.
+        /// </summary>
+        public bool RelayOnly { get; set; }
+
+        /// <summary>How long to wait for a TURN server's allocation when gathering.</summary>
+        public TimeSpan TurnServerTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>Checks a TURN server's certificate of TLS or DTLS in place of the system's checks; of none, the system's.</summary>
+        public System.Net.Security.RemoteCertificateValidationCallback TurnCertificateValidation { get; set; }
 
         /// <summary>Whether to gather candidates of IPv6 addresses too, link-local ones left out.</summary>
         public bool IncludeIPv6 { get; set; } = false;

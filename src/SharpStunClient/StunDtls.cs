@@ -131,6 +131,8 @@ namespace SharpStunClient
                     var message = StunMessage.Parse(buffer, 0, count);
                     if (message != null)
                         OnMessageReceived(message, RemoteEndPoint);
+                    else if (count >= 4 && IsChannelData(buffer[0]))
+                        OnDataReceived(buffer, 0, count);
                 }
             }
             catch (Exception ex) when (ex is IOException || ex is TlsException || ex is ObjectDisposedException || ex is SocketException)
@@ -426,6 +428,8 @@ namespace SharpStunClient
             _socket = socket;
             _remote = remote;
         }
+
+        public IPEndPoint LocalEndPoint => (IPEndPoint)_socket.LocalEndPoint;
 
         public DateTime LastReceived { get; private set; } = DateTime.UtcNow;
 

@@ -327,6 +327,72 @@ namespace SharpICE.Tests
             Assert.AreEqual("found", await SendAndReceive(hiding, resolving, "found"));
         }
 
+        private static SharpTurnServer.TurnServer TurnServer(out string uri)
+        {
+            var server = new SharpTurnServer.TurnServer(new SharpTurnServer.TurnServerOptions
+            {
+                Stun = new SharpStunServer.StunServerOptions
+                {
+                    Realm = "example.org",
+                    Users = new Dictionary<string, string> { ["user"] = "secret" },
+                    AuthenticateBinding = false,
+                },
+                RelayAddress = IPAddress.Loopback,
+            });
+            uri = "turn:127.0.0.1:" + server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0)).Port;
+            return server;
+        }
+
+        private static IceAgentOptions Relayed(string uri, IceRole role)
+        {
+            var options = Loopback(role);
+            options.RelayOnly = true;
+            options.TurnServers.Add(new IceTurnServer { Uri = uri, Username = "user", Password = "secret" });
+            return options;
+        }
+
+        [TestMethod]
+        public async Task ConnectsThroughTurnRelaysAlone()
+        {
+            using var server = TurnServer(out string uri);
+            var controlling = new IceAgent(Relayed(uri, IceRole.Controlling));
+            var controlled = new IceAgent(Relayed(uri, IceRole.Controlled));
+            try
+            {
+                await Connect(controlling, controlled);
+
+                Assert.AreEqual(IceCandidateType.Relayed, controlling.LocalCandidates.Single().Type, "of the relay alone");
+                Assert.AreEqual(IPAddress.Loopback.ToString(), controlling.LocalCandidates.Single().RelatedAddress, "of the mapped address the allocation saw");
+                Assert.AreEqual(IceCandidateType.Relayed, controlling.SelectedPair.Local.Type);
+                Assert.AreEqual(IceCandidateType.Relayed, controlled.SelectedPair.Local.Type);
+                Assert.AreEqual(2, server.AllocationCount);
+                Assert.AreEqual("relayed", await SendAndReceive(controlling, controlled, "relayed"));
+                Assert.AreEqual("back", await SendAndReceive(controlled, controlling, "back"));
+            }
+            finally
+            {
+                controlling.Dispose();
+                controlled.Dispose();
+            }
+            Assert.AreEqual(0, server.AllocationCount, "deleted as the agents closed");
+        }
+
+        [TestMethod]
+        public async Task ConnectsARelayToAHost()
+        {
+            using var server = TurnServer(out string uri);
+            using var relayed = new IceAgent(Relayed(uri, IceRole.Controlling));
+            using var host = new IceAgent(Loopback());
+
+            await Connect(relayed, host);
+
+            Assert.AreEqual(IceCandidateType.Relayed, relayed.SelectedPair.Local.Type);
+            Assert.AreEqual(IceCandidateType.Host, relayed.SelectedPair.Remote.Type);
+            Assert.AreEqual(relayed.LocalCandidates.Single().EndPoint, host.SelectedPair.RemoteEndPoint, "of the relayed address, as the host sees it");
+            Assert.AreEqual("through", await SendAndReceive(relayed, host, "through"));
+            Assert.AreEqual("the relay", await SendAndReceive(host, relayed, "the relay"));
+        }
+
         [TestMethod]
         public async Task ControlsALitePeer()
         {

@@ -41,6 +41,88 @@ using System.Threading.Tasks;
 
 namespace SharpStunServer
 {
+    /// <summary>The transport between a client and the server: of a 5-tuple's protocol.</summary>
+    public enum StunServerProtocol
+    {
+        Udp,
+        Tcp,
+        Tls,
+        Dtls
+    }
+
+    /// <summary>
+    /// A 5-tuple of the server's: a client's address and the server's, over a transport - a datagram's of UDP, a connection of
+    /// TCP or TLS, an association of DTLS. What the server sends the client goes over it, at any time: of TURN, the data of
+    /// its peers. Of UDP, one of each datagram, alike of one client: <see cref="Key"/> tells them as one.
+    /// </summary>
+    public sealed class StunServerConnection
+    {
+        private readonly Action<byte[]> _send;
+
+        public StunServerConnection(StunServerProtocol protocol, IPEndPoint localEndPoint, IPEndPoint remoteEndPoint, Action<byte[]> send)
+        {
+            Protocol = protocol;
+            LocalEndPoint = localEndPoint;
+            RemoteEndPoint = remoteEndPoint;
+            _send = send;
+            Key = protocol + " " + localEndPoint + " " + remoteEndPoint;
+        }
+
+        public StunServerProtocol Protocol { get; }
+        public IPEndPoint LocalEndPoint { get; }
+        public IPEndPoint RemoteEndPoint { get; }
+
+        /// <summary>The 5-tuple, as a string: alike of every datagram of one client of UDP.</summary>
+        public string Key { get; }
+
+        /// <summary>Of TLS or DTLS.</summary>
+        public bool IsSecure => Protocol == StunServerProtocol.Tls || Protocol == StunServerProtocol.Dtls;
+
+        /// <summary>Of TCP or TLS, whose ChannelData is padded to 4 bytes (RFC 8656 12.5).</summary>
+        public bool IsStream => Protocol == StunServerProtocol.Tcp || Protocol == StunServerProtocol.Tls;
+
+        /// <summary>Sends the bytes to the client; false of a connection that ended.</summary>
+        public bool Send(byte[] data)
+        {
+            try
+            {
+                _send(data);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is TlsException)
+            {
+                return false;
+            }
+        }
+
+        public override string ToString() => Key;
+    }
+
+    /// <summary>
+    /// A request of a method other than Binding, for the server's <see cref="StunServer.RequestHandler"/>: its message, its
+    /// 5-tuple, and the user it was authenticated of - null of a server of no realm.
+    /// </summary>
+    public sealed class StunServerRequest
+    {
+        internal StunServerRequest(StunMessage message, StunServerConnection connection, string username)
+        {
+            Message = message;
+            Connection = connection;
+            Username = username;
+        }
+
+        public StunMessage Message { get; }
+        public StunServerConnection Connection { get; }
+        public string Username { get; }
+
+        /// <summary>An error response to it, of the code and reason given.</summary>
+        public StunMessage Error(int code, string reason)
+            => new StunMessage(Message.Method, StunMessageClass.ErrorResponse, Message.TransactionId).AddError(code, reason);
+
+        /// <summary>A success response to it.</summary>
+        public StunMessage Success() => new StunMessage(Message.Method, StunMessageClass.SuccessResponse, Message.TransactionId);
+    }
+
     public sealed class StunServerOptions
     {
         /// <summary>
@@ -48,6 +130,12 @@ namespace SharpStunServer
         /// first challenged with a 401; of none, every request is answered as it is.
         /// </summary>
         public string Realm { get; set; }
+
+        /// <summary>
+        /// Whether a Binding request is to be of the credentials too, of a realm; of TURN, not, as a server of TURN answers
+        /// one as a server of STUN does.
+        /// </summary>
+        public bool AuthenticateBinding { get; set; } = true;
 
         /// <summary>The users of the long-term credentials, and their passwords.</summary>
         public IDictionary<string, string> Users { get; set; } = new Dictionary<string, string>();
@@ -113,6 +201,23 @@ namespace SharpStunServer
             using (var random = RandomNumberGenerator.Create())
                 random.GetBytes(_nonceKey);
         }
+
+        public StunServerOptions Options => _options;
+
+        /// <summary>
+        /// Answers a request of a method other than Binding, authenticated as the options say: its response - signed then as
+        /// the request was - or null of none. Of none given, such a request is discarded (RFC 8489 6.3).
+        /// </summary>
+        public Func<StunServerRequest, StunMessage> RequestHandler { get; set; }
+
+        /// <summary>An indication of a client's - never authenticated (RFC 8656 5) - of no unknown comprehension-required attribute.</summary>
+        public Action<StunMessage, StunServerConnection> IndicationHandler { get; set; }
+
+        /// <summary>What a client sent that is not STUN: ChannelData (RFC 8656 12.4), its padding over a stream left out.</summary>
+        public Action<StunServerConnection, byte[], int, int> DataHandler { get; set; }
+
+        /// <summary>A connection of TCP or TLS, or an association of DTLS, that ended.</summary>
+        public event EventHandler<StunServerConnection> ConnectionClosed;
 
         private void Trace(string message) => _options.Trace?.Invoke(message);
 
@@ -238,10 +343,18 @@ namespace SharpStunServer
         private void ServeDtlsPeer(QueuedDatagramTransport peer, DtlsRequest request, IPEndPoint from, BcTlsCrypto crypto, DtlsCredentials credentials, ConcurrentDictionary<string, QueuedDatagramTransport> peers, string id)
         {
             DtlsTransport dtls = null;
+            StunServerConnection connection = null;
             try
             {
                 dtls = new DtlsServerProtocol().Accept(new DtlsStunServer(crypto, credentials, 10000), peer, request);
                 Trace($"DTLS of {from}");
+                var association = dtls;
+                var writing = new object();
+                connection = new StunServerConnection(StunServerProtocol.Dtls, peer.LocalEndPoint, from, data =>
+                {
+                    lock (writing)
+                        association.Send(data, 0, data.Length);
+                });
                 byte[] buffer = new byte[65536];
                 while (!_cts.IsCancellationRequested)
                 {
@@ -252,9 +365,7 @@ namespace SharpStunServer
                             break;
                         continue;
                     }
-                    byte[] response = Process(buffer, 0, count, from, true);
-                    if (response != null)
-                        dtls.Send(response, 0, response.Length);
+                    Receive(connection, buffer, 0, count);
                 }
             }
             catch (Exception ex) when (ex is IOException || ex is SocketException || ex is TlsException || ex is ObjectDisposedException)
@@ -272,6 +383,8 @@ namespace SharpStunServer
                 }
                 peers.TryRemove(id, out _);
                 peer.Close();
+                if (connection != null)
+                    ConnectionClosed?.Invoke(this, connection);
             }
         }
 
@@ -289,6 +402,7 @@ namespace SharpStunServer
 
         private async Task ServeUdpAsync(Socket socket)
         {
+            var local = (IPEndPoint)socket.LocalEndPoint;
             byte[] buffer = new byte[65536];
             var any = new IPEndPoint(socket.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
             while (!_cts.IsCancellationRequested)
@@ -308,15 +422,9 @@ namespace SharpStunServer
                     return;
                 }
 
-                try
-                {
-                    byte[] response = Process(buffer, 0, result.ReceivedBytes, (IPEndPoint)result.RemoteEndPoint, false);
-                    if (response != null)
-                        socket.SendTo(response, result.RemoteEndPoint);
-                }
-                catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
-                {
-                }
+                var remote = Normalize((IPEndPoint)result.RemoteEndPoint);
+                var connection = new StunServerConnection(StunServerProtocol.Udp, local, remote, data => socket.SendTo(data, remote));
+                Receive(connection, buffer, 0, result.ReceivedBytes);
             }
         }
 
@@ -341,12 +449,15 @@ namespace SharpStunServer
             }
         }
 
-        // a connection of STUN alone, each message of its own length (RFC 8489 6.2.2), answered over it
+        // a connection of STUN, each message of its own length (RFC 8489 6.2.2), and of ChannelData, each padded to 4 bytes
+        // (RFC 8656 12.5); answered over it
         private async Task ServeStreamAsync(TcpClient client, bool tls)
         {
             using (client)
             {
-                var from = (IPEndPoint)client.Client.RemoteEndPoint;
+                var from = Normalize((IPEndPoint)client.Client.RemoteEndPoint);
+                var local = (IPEndPoint)client.Client.LocalEndPoint;
+                StunServerConnection connection = null;
                 try
                 {
                     Stream stream = client.GetStream();
@@ -358,10 +469,28 @@ namespace SharpStunServer
                     }
                     using (stream)
                     {
+                        var writing = new object();
+                        connection = new StunServerConnection(tls ? StunServerProtocol.Tls : StunServerProtocol.Tcp, local, from, data =>
+                        {
+                            lock (writing)
+                                stream.Write(data, 0, data.Length);
+                        });
                         byte[] header = new byte[StunMessage.HeaderLength];
                         while (!_cts.IsCancellationRequested)
                         {
-                            if (!await ReadAsync(stream, header, 0, header.Length).ConfigureAwait(false))
+                            if (!await ReadAsync(stream, header, 0, 4).ConfigureAwait(false))
+                                return;
+                            if (StunTransport.IsChannelData(header[0]))
+                            {
+                                int dataLength = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
+                                byte[] channelData = new byte[4 + ((dataLength + 3) & ~3)];
+                                Buffer.BlockCopy(header, 0, channelData, 0, 4);
+                                if (!await ReadAsync(stream, channelData, 4, channelData.Length - 4).ConfigureAwait(false))
+                                    return;
+                                Receive(connection, channelData, 0, 4 + dataLength);
+                                continue;
+                            }
+                            if (!await ReadAsync(stream, header, 4, header.Length - 4).ConfigureAwait(false))
                                 return;
                             if ((header[0] & 0xC0) != 0 || BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(4)) != StunMessage.MagicCookie)
                                 return;
@@ -370,16 +499,18 @@ namespace SharpStunServer
                             Buffer.BlockCopy(header, 0, message, 0, header.Length);
                             if (!await ReadAsync(stream, message, header.Length, length).ConfigureAwait(false))
                                 return;
-
-                            byte[] response = Process(message, 0, message.Length, from, tls);
-                            if (response != null)
-                                await stream.WriteAsync(response, 0, response.Length).ConfigureAwait(false);
+                            Receive(connection, message, 0, message.Length);
                         }
                     }
                 }
                 catch (Exception ex) when (ex is IOException || ex is SocketException || ex is AuthenticationException || ex is ObjectDisposedException)
                 {
                     Trace($"Connection of {from} ended: {ex.Message}");
+                }
+                finally
+                {
+                    if (connection != null)
+                        ConnectionClosed?.Invoke(this, connection);
                 }
             }
         }
@@ -403,26 +534,55 @@ namespace SharpStunServer
 
         /// <summary>
         /// The answer to a message from the address given, over a transport of TLS (or DTLS) or not: the response's bytes, or
-        /// null of none - of what is not a STUN request it answers, which is discarded (RFC 8489 6.3).
+        /// null of none - of what is not a STUN request it answers, which is discarded (RFC 8489 6.3). Of a transport of the
+        /// caller's: a request whose handler sends the client more than its response is to be of <see cref="Receive"/>.
         /// </summary>
         public byte[] Process(byte[] buffer, int offset, int count, IPEndPoint from, bool secure)
         {
+            byte[] answer = null;
+            var connection = new StunServerConnection(secure ? StunServerProtocol.Dtls : StunServerProtocol.Udp, new IPEndPoint(IPAddress.Any, 0),
+                Normalize(from), data => answer ??= data);
+            Receive(connection, buffer, offset, count);
+            return answer;
+        }
+
+        /// <summary>
+        /// A message - or ChannelData - of a client's over a 5-tuple: a request answered over it, an indication or ChannelData
+        /// handed to the handler of it, anything else discarded (RFC 8489 6.3).
+        /// </summary>
+        public void Receive(StunServerConnection connection, byte[] buffer, int offset, int count)
+        {
+            if (count >= 4 && StunTransport.IsChannelData(buffer[offset]))
+            {
+                DataHandler?.Invoke(connection, buffer, offset, count);
+                return;
+            }
             var request = StunMessage.Parse(buffer, offset, count);
             if (request == null || request.HasFingerprint && !request.VerifyFingerprint())
-                return null;
-            // an indication of Binding asks for nothing; a response is of no transaction of a server's; another method is not one
-            // it supports
-            if (request.Class != StunMessageClass.Request || request.Method != StunMethod.Binding)
-                return null;
-            from = Normalize(from);
+                return;
+            if (request.Class == StunMessageClass.Indication)
+            {
+                // of an attribute it is not to be understood without, dropped (RFC 8489 6.3.2)
+                if (request.GetUnknownComprehensionRequired().Count == 0)
+                    IndicationHandler?.Invoke(request, connection);
+                return;
+            }
+            // a response is of no transaction of a server's; a method it supports neither itself nor of a handler is not one
+            if (request.Class != StunMessageClass.Request || request.Method != StunMethod.Binding && RequestHandler == null)
+                return;
+            var from = connection.RemoteEndPoint;
 
             byte[] key = null;
+            string username = null;
             var integrity = StunIntegrity.None;
-            if (_options.Realm != null)
+            if (_options.Realm != null && (request.Method != StunMethod.Binding || _options.AuthenticateBinding))
             {
-                var error = Authenticate(request, from, out key, out integrity);
+                var error = Authenticate(request, from, out key, out integrity, out username);
                 if (error != null)
-                    return Finish(error, request, null, StunIntegrity.None);
+                {
+                    connection.Send(Finish(error, request, null, StunIntegrity.None));
+                    return;
+                }
             }
 
             // of an attribute it is not to be understood without, a 420 that lists them (RFC 8489 6.3.1)
@@ -430,25 +590,35 @@ namespace SharpStunServer
             if (unknown.Count > 0)
             {
                 var error = Error(request, StunErrorCode.UnknownAttribute, "Unknown Attribute").AddUnknownAttributes(unknown);
-                return Finish(error, request, key, integrity);
+                connection.Send(Finish(error, request, key, integrity));
+                return;
             }
 
-            var alternate = _options.AlternateServer?.Invoke(from);
-            if (alternate != null)
+            // a Binding, or an Allocate (RFC 8656 7.2), to another server: of the request's address family (RFC 8489 10); its
+            // certificate's name, of a request of TLS of SHA-256
+            var alternate = request.Method == StunMethod.Binding || request.Method == StunMethod.Allocate ? _options.AlternateServer?.Invoke(from) : null;
+            if (alternate != null && alternate.AddressFamily == from.AddressFamily)
             {
-                // of the request's address family (RFC 8489 10); its certificate's name, of a request of TLS of SHA-256
-                if (alternate.AddressFamily == from.AddressFamily)
-                {
-                    var redirect = Error(request, StunErrorCode.TryAlternate, "Try Alternate").AddAddress(alternate, StunAttributeType.AlternateServer);
-                    if (secure && integrity == StunIntegrity.Sha256 && _options.AlternateDomain != null)
-                        redirect.AddString(StunAttributeType.AlternateDomain, _options.AlternateDomain);
-                    Trace($"Redirected {from} to {alternate}");
-                    return Finish(redirect, request, key, integrity);
-                }
+                var redirect = Error(request, StunErrorCode.TryAlternate, "Try Alternate").AddAddress(alternate, StunAttributeType.AlternateServer);
+                if (connection.IsSecure && integrity == StunIntegrity.Sha256 && _options.AlternateDomain != null)
+                    redirect.AddString(StunAttributeType.AlternateDomain, _options.AlternateDomain);
+                Trace($"Redirected {from} to {alternate}");
+                connection.Send(Finish(redirect, request, key, integrity));
+                return;
             }
 
-            var response = new StunMessage(request.Method, StunMessageClass.SuccessResponse, request.TransactionId).AddXorAddress(from);
-            return Finish(response, request, key, integrity);
+            StunMessage response;
+            if (request.Method == StunMethod.Binding)
+            {
+                response = new StunMessage(request.Method, StunMessageClass.SuccessResponse, request.TransactionId).AddXorAddress(from);
+            }
+            else
+            {
+                response = RequestHandler(new StunServerRequest(request, connection, username));
+                if (response == null)
+                    return;
+            }
+            connection.Send(Finish(response, request, key, integrity));
         }
 
         private static StunMessage Error(StunMessage request, int code, string reason)
@@ -475,10 +645,11 @@ namespace SharpStunServer
 
         // the server's checks of long-term credentials (RFC 8489 9.2.4), in their order: the error response, or null of a request
         // authenticated, of the key and the integrity its response is signed of
-        private StunMessage Authenticate(StunMessage request, IPEndPoint from, out byte[] key, out StunIntegrity integrity)
+        private StunMessage Authenticate(StunMessage request, IPEndPoint from, out byte[] key, out StunIntegrity integrity, out string authenticated)
         {
             key = null;
             integrity = StunIntegrity.None;
+            authenticated = null;
             if (!request.HasIntegrity && !request.HasIntegritySha256)
                 return Challenge(request, from, StunErrorCode.Unauthorized, "Unauthenticated");
 
@@ -542,6 +713,7 @@ namespace SharpStunServer
             // MESSAGE-INTEGRITY-SHA256, unless the request was of MD5 as of no algorithm listed, of MESSAGE-INTEGRITY then
             key = candidate;
             integrity = listed || request.HasIntegritySha256 ? StunIntegrity.Sha256 : StunIntegrity.Sha1;
+            authenticated = username;
             return null;
         }
 

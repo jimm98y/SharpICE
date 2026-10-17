@@ -64,6 +64,12 @@ namespace SharpStunClient
         /// a "turns" URI says which of its "?transport=".
         /// </summary>
         public bool UseDtls { get; set; }
+
+        /// <summary>
+        /// Whether to take SHA-256 of a server that lists it among its password algorithms, whatever its order: as a TURN client
+        /// is to (RFC 8656 6), rather than the first of the list (RFC 8489 9.2.5).
+        /// </summary>
+        public bool PreferSha256 { get; set; }
     }
 
     /// <summary>A transaction that failed otherwise than of no answer, or of an error response: what failed, and the response of it.</summary>
@@ -143,6 +149,30 @@ namespace SharpStunClient
         }
 
         public StunTransport Transport => _transport;
+
+        public StunClientOptions Options => _options;
+
+        /// <summary>An indication of the server's: of TURN, a Data indication (RFC 8656 11.4).</summary>
+        public event EventHandler<StunMessageEventArgs> IndicationReceived;
+
+        /// <summary>What the server sent that is not STUN: of TURN, ChannelData (RFC 8656 12.4).</summary>
+        public event EventHandler<StunDataEventArgs> DataReceived;
+
+        /// <summary>The connection of a reliable transport ended: of the error, or of null, closed by the server.</summary>
+        public event EventHandler<Exception> Closed;
+
+        /// <summary>An indication (RFC 8489 6.1), of no credentials, as an indication is never authenticated (RFC 8656 5).</summary>
+        public Task SendIndicationAsync(StunMessage indication, CancellationToken cancellationToken = default)
+        {
+            if (indication == null)
+                throw new ArgumentNullException(nameof(indication));
+            if (indication.Class != StunMessageClass.Indication)
+                throw new ArgumentException("Of an indication.", nameof(indication));
+            return _transport.SendAsync(indication.ToBytes(null, false), cancellationToken);
+        }
+
+        /// <summary>Bytes as they are: of TURN, a ChannelData message.</summary>
+        public Task SendRawAsync(byte[] data, CancellationToken cancellationToken = default) => _transport.SendAsync(data, cancellationToken);
 
         /// <summary>Whether a request of the long-term credentials succeeded: the next ones are sent of them.</summary>
         public bool IsAuthenticated { get; private set; }
@@ -383,6 +413,12 @@ namespace SharpStunClient
         private void OnMessageReceived(object sender, StunMessageEventArgs e)
         {
             var message = e.Message;
+            if (message.Class == StunMessageClass.Indication)
+            {
+                if (!message.HasFingerprint || message.VerifyFingerprint())
+                    IndicationReceived?.Invoke(this, e);
+                return;
+            }
             if (message.Class != StunMessageClass.SuccessResponse && message.Class != StunMessageClass.ErrorResponse)
                 return;
             Transaction transaction;
@@ -424,7 +460,11 @@ namespace SharpStunClient
                 pending = _transactions.Values.ToList();
             foreach (var transaction in pending)
                 transaction.Completion.TrySetException(new StunException("The connection to the server ended.", null, error));
+            if (sender is StunTransport)
+                Closed?.Invoke(this, error);
         }
+
+        private void OnDataReceived(object sender, StunDataEventArgs e) => DataReceived?.Invoke(this, e);
 
         #endregion // Transactions
 
@@ -453,8 +493,10 @@ namespace SharpStunClient
                 var algorithm = StunPasswordAlgorithm.Md5;
                 if (algorithmsAttribute != null)
                 {
-                    ushort? first = response.PasswordAlgorithms.Cast<ushort?>()
-                        .FirstOrDefault(a => a == (ushort)StunPasswordAlgorithm.Md5 || a == (ushort)StunPasswordAlgorithm.Sha256);
+                    var listed = response.PasswordAlgorithms;
+                    ushort? first = _options.PreferSha256 && listed.Contains((ushort)StunPasswordAlgorithm.Sha256)
+                        ? (ushort)StunPasswordAlgorithm.Sha256
+                        : listed.Cast<ushort?>().FirstOrDefault(a => a == (ushort)StunPasswordAlgorithm.Md5 || a == (ushort)StunPasswordAlgorithm.Sha256);
                     if (first == null)
                         return false;
                     algorithm = (StunPasswordAlgorithm)first.Value;
@@ -515,6 +557,7 @@ namespace SharpStunClient
         {
             _transport = transport;
             transport.MessageReceived += OnMessageReceived;
+            transport.DataReceived += OnDataReceived;
             transport.Closed += OnClosed;
         }
 
@@ -525,6 +568,7 @@ namespace SharpStunClient
             if (transport != old)
             {
                 old.MessageReceived -= OnMessageReceived;
+                old.DataReceived -= OnDataReceived;
                 old.Closed -= OnClosed;
                 if (_ownsTransport)
                     old.Dispose();
@@ -581,6 +625,7 @@ namespace SharpStunClient
         {
             OnClosed(this, null);
             _transport.MessageReceived -= OnMessageReceived;
+            _transport.DataReceived -= OnDataReceived;
             _transport.Closed -= OnClosed;
             if (_ownsTransport)
                 _transport.Dispose();

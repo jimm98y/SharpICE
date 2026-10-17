@@ -44,13 +44,35 @@ namespace SharpStunClient
     }
 
     /// <summary>
+    /// What the server sent that is not STUN: of TURN, a ChannelData message (RFC 8656 12.4), its padding over TCP left out. Its
+    /// buffer is its own.
+    /// </summary>
+    public sealed class StunDataEventArgs : EventArgs
+    {
+        public StunDataEventArgs(byte[] buffer, int offset, int count)
+        {
+            Buffer = buffer;
+            Offset = offset;
+            Count = count;
+        }
+
+        public byte[] Buffer { get; }
+        public int Offset { get; }
+        public int Count { get; }
+    }
+
+    /// <summary>
     /// What a <see cref="StunClient"/> sends its messages over to a server, and receives them of: UDP, whose requests are
-    /// retransmitted (RFC 8489 6.2.1), or TCP and TLS over it, which are reliable (RFC 8489 6.2.2).
+    /// retransmitted (RFC 8489 6.2.1), or TCP and TLS over it, which are reliable (RFC 8489 6.2.2). Of TURN, its ChannelData
+    /// too, told of as <see cref="DataReceived"/>.
     /// </summary>
     public abstract class StunTransport : IDisposable
     {
         /// <summary>Of TCP: no retransmissions, a transaction ended once the connection is.</summary>
         public abstract bool IsReliable { get; }
+
+        /// <summary>Of a stream - TCP, TLS - whose ChannelData messages are padded to 4 bytes (RFC 8656 12.5).</summary>
+        public virtual bool IsStream => false;
 
         /// <summary>The server's address.</summary>
         public IPEndPoint RemoteEndPoint { get; protected set; }
@@ -61,12 +83,25 @@ namespace SharpStunClient
 
         public event EventHandler<StunMessageEventArgs> MessageReceived;
 
+        /// <summary>What the server sent that is not STUN: ChannelData (RFC 8656 12.4), of its first byte of 0x40 to 0x4F.</summary>
+        public event EventHandler<StunDataEventArgs> DataReceived;
+
         /// <summary>The connection of a reliable transport ended: of the error, or of null, closed by the server.</summary>
         public event EventHandler<Exception> Closed;
 
         protected void OnMessageReceived(StunMessage message, IPEndPoint from) => MessageReceived?.Invoke(this, new StunMessageEventArgs(message, from));
 
         protected void OnClosed(Exception error) => Closed?.Invoke(this, error);
+
+        protected void OnDataReceived(byte[] buffer, int offset, int count)
+        {
+            byte[] copy = new byte[count];
+            Buffer.BlockCopy(buffer, offset, copy, 0, count);
+            DataReceived?.Invoke(this, new StunDataEventArgs(copy, 0, count));
+        }
+
+        /// <summary>Whether data is of a ChannelData message: of its first byte, of 0x40 to 0x4F (RFC 7983, RFC 8656 12).</summary>
+        public static bool IsChannelData(byte first) => first >= 0x40 && first <= 0x4F;
 
         /// <summary>
         /// A transport of the same protocol to another server, of an ALTERNATE-SERVER (RFC 8489 10): of TLS, its certificate of
@@ -117,14 +152,23 @@ namespace SharpStunClient
             return Task.CompletedTask;
         }
 
-        /// <summary>A datagram read off the socket elsewhere: true of a STUN message, which is told of.</summary>
+        /// <summary>
+        /// A datagram read off the socket elsewhere: true of a STUN message, or of ChannelData of the server's, which are told of.
+        /// </summary>
         public bool Receive(byte[] buffer, int offset, int count, IPEndPoint from)
         {
             var message = StunMessage.Parse(buffer, offset, count);
-            if (message == null)
-                return false;
-            OnMessageReceived(message, from);
-            return true;
+            if (message != null)
+            {
+                OnMessageReceived(message, from);
+                return true;
+            }
+            if (count >= 4 && IsChannelData(buffer[offset]) && from.Equals(RemoteEndPoint))
+            {
+                OnDataReceived(buffer, offset, count);
+                return true;
+            }
+            return false;
         }
 
         public override Task<StunTransport> RedirectAsync(IPEndPoint server, string domain, CancellationToken cancellationToken = default)
@@ -226,6 +270,8 @@ namespace SharpStunClient
 
         public override bool IsReliable => true;
 
+        public override bool IsStream => true;
+
         public bool IsSecure => _tlsHost != null;
 
         public override IPEndPoint LocalEndPoint => _localEndPoint;
@@ -255,11 +301,24 @@ namespace SharpStunClient
             {
                 while (!_cts.IsCancellationRequested)
                 {
-                    if (!await ReadExactlyAsync(header, 0, header.Length).ConfigureAwait(false))
+                    if (!await ReadExactlyAsync(header, 0, 4).ConfigureAwait(false))
                         break;
-                    // a stream of STUN alone: each message's header says how long it is
+                    // ChannelData of TURN: its length, then its data, padded to 4 bytes over a stream (RFC 8656 12.5)
+                    if (IsChannelData(header[0]))
+                    {
+                        int dataLength = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
+                        byte[] channelData = new byte[4 + ((dataLength + 3) & ~3)];
+                        Buffer.BlockCopy(header, 0, channelData, 0, 4);
+                        if (!await ReadExactlyAsync(channelData, 4, channelData.Length - 4).ConfigureAwait(false))
+                            break;
+                        OnDataReceived(channelData, 0, 4 + dataLength);
+                        continue;
+                    }
+                    if (!await ReadExactlyAsync(header, 4, header.Length - 4).ConfigureAwait(false))
+                        break;
+                    // else STUN: each message's header says how long it is
                     if ((header[0] & 0xC0) != 0 || BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(4)) != StunMessage.MagicCookie)
-                        throw new InvalidDataException("What the server sent is not STUN.");
+                        throw new InvalidDataException("What the server sent is neither STUN nor ChannelData.");
                     int length = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
                     byte[] message = new byte[StunMessage.HeaderLength + length];
                     Buffer.BlockCopy(header, 0, message, 0, header.Length);

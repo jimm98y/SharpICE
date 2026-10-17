@@ -52,11 +52,43 @@ server.ListenDtls(new IPEndPoint(IPAddress.Any, 5349));
 ```
 
 ## SharpTurnClient
-A TURN client - Traversal Using Relays around NAT [RFC8656](https://www.rfc-editor.org/rfc/rfc8656). To be done.
+A TURN client - Traversal Using Relays around NAT [RFC8656](https://www.rfc-editor.org/rfc/rfc8656) - of UDP allocations, over any transport of SharpStunClient: UDP, TCP, TLS or DTLS:
+1. Allocate of REQUESTED-ADDRESS-FAMILY, of a dual allocation of ADDITIONAL-ADDRESS-FAMILY, of EVEN-PORT and its RESERVATION-TOKEN, of DONT-FRAGMENT and LIFETIME; SHA-256 taken of a server that lists it
+1. The allocation refreshed a minute before it expires, permissions every 4 minutes, channels every 9; deleted of a Refresh of 0
+1. Data to a peer of Send indications, or of ChannelData once a channel is bound - padded over a stream - a permission of its address installed first; of Data indications and ChannelData, of peers of a permission
+1. TURN URIs [RFC7065](https://www.rfc-editor.org/rfc/rfc7065) and their SRV records
+
+```cs
+using var turn = await TurnClient.ConnectAsync("turn:turn.example.org?transport=udp", new StunClientOptions { Username = "user", Password = "pass" });
+await turn.AllocateAsync();
+turn.DataReceived += (s, e) => { /* e.Peer, e.Data */ };
+await turn.SendAsync(peer, data);          // a permission first, then a Send indication
+await turn.BindChannelAsync(peer);         // ChannelData from then on
+```
+
+## SharpTurnServer
+A TURN server of UDP allocations [RFC8656](https://www.rfc-editor.org/rfc/rfc8656), over the transports of SharpStunServer:
+1. Allocate, Refresh, CreatePermission and ChannelBind of long-term credentials, the requests of an allocation of its own user alone (441)
+1. A relay of UDP of each allocation, of a port of the dynamic range at random; dual allocations, and their partial failure of ADDRESS-ERROR-CODE; EVEN-PORT and the next port reserved 30 seconds
+1. Permissions of 5 minutes, channels of 10, lifetimes of the default and the maximum; an allocation of TCP or TLS ended with its connection
+1. Data of the peers relayed of Data indications, or of ChannelData of a channel bound; Send indications and ChannelData of the client relayed to its peers
+1. The error responses of RFC 8656 19: 403, 437, 440, 441, 442, 443, 486, 508; a retransmitted Allocate answered again
+
+ICMP errors are not relayed, as the system does not say which peer they are of; TCP allocations [RFC6062](https://www.rfc-editor.org/rfc/rfc6062) are not done.
+
+```cs
+var server = new TurnServer(new TurnServerOptions
+{
+    Stun = new StunServerOptions { Realm = "example.org", Users = new Dictionary<string, string> { ["user"] = "pass" }, AuthenticateBinding = false },
+    RelayAddress = IPAddress.Parse("203.0.113.7"),
+});
+server.ListenUdp(new IPEndPoint(IPAddress.Any, 3478));
+server.ListenTcp(new IPEndPoint(IPAddress.Any, 3478));
+```
 
 ## SharpICE
 An ICE agent - Interactive Connectivity Establishment [RFC8445](https://www.rfc-editor.org/rfc/rfc8445) - of one component, RTP and RTCP multiplexed on it and all media bundled, as WebRTC has it:
-1. Host candidates of the local addresses, a socket each, and server reflexive ones of STUN servers, found of DNS SRV too
+1. Host candidates of the local addresses, a socket each, server reflexive ones of STUN servers, found of DNS SRV too, and relayed ones of TURN servers - of them alone, if asked to - a channel bound to the peer of a relayed pair selected
 1. ICE over TCP [RFC6544](https://www.rfc-editor.org/rfc/rfc6544), if asked for: passive and active candidates, framed as [RFC4571](https://www.rfc-editor.org/rfc/rfc4571) frames them, UDP preferred; simultaneous-open is not done
 1. Candidates as SDP carries them [RFC8839](https://www.rfc-editor.org/rfc/rfc8839), and peer reflexive ones learnt of the peer's checks
 1. The peer's candidates of mDNS names (".local"), as browsers hide their addresses behind, resolved of multicast DNS [RFC6762](https://www.rfc-editor.org/rfc/rfc6762); a peer reflexive candidate learnt first taking the type it is signalled of
