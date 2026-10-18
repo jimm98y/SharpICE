@@ -334,9 +334,12 @@ namespace SharpICE
             return !compatible || IPAddress.IsLoopback(address);
         }
 
-        // of an address of the system's that says, not deprecated, nor tentative or a duplicate of another's
+        // of an address of the system's that says, not deprecated, nor tentative or a duplicate of another's: Windows alone
+        //  says it, and elsewhere asking throws - each address taken, as the system has nothing of the kind to tell
         private static bool IsPreferred(UnicastIPAddressInformation unicast)
         {
+            if (!System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
+                return true;
             try
             {
                 return unicast.DuplicateAddressDetectionState == DuplicateAddressDetectionState.Preferred;

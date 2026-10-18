@@ -88,6 +88,17 @@ namespace SharpStunCommon
             };
         }
 
+        // a certificate of its DER: of .NET 9 and later of X509CertificateLoader, as the constructor of bytes is obsolete there
+        //  (SYSLIB0057); before it, of the constructor, which is all there is
+        private static X509Certificate2 LoadCertificate(byte[] der)
+        {
+#if NET9_0_OR_GREATER
+            return X509CertificateLoader.LoadCertificate(der);
+#else
+            return new X509Certificate2(der);
+#endif
+        }
+
         /// <summary>
         /// Whether a server's certificate is to be taken: of the system's chain, and of the host name - of a DNS name of its
         /// subject alternative names, a wildcard the leftmost label, or of an IP address of them; or of its common name, of
@@ -97,7 +108,7 @@ namespace SharpStunCommon
         {
             if (chain == null || chain.IsEmpty)
                 return false;
-            var certificates = Enumerable.Range(0, chain.Length).Select(i => new X509Certificate2(chain.GetCertificateAt(i).GetEncoded())).ToList();
+            var certificates = Enumerable.Range(0, chain.Length).Select(i => LoadCertificate(chain.GetCertificateAt(i).GetEncoded())).ToList();
             var leaf = certificates[0];
             var errors = SslPolicyErrors.None;
             using (var x509Chain = new X509Chain())
