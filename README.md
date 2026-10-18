@@ -104,6 +104,7 @@ server.ListenTcp(new IPEndPoint(IPAddress.Any, 3478));
 An ICE agent - Interactive Connectivity Establishment [RFC8445](https://www.rfc-editor.org/rfc/rfc8445) - of one component, RTP and RTCP multiplexed on it and all media bundled, as WebRTC has it:
 1. Host candidates of the local addresses, a socket each, server reflexive ones of STUN servers, found of DNS SRV too, and relayed ones of TURN servers - of them alone, if asked to - a channel bound to the peer of a relayed pair selected
 1. ICE over TCP [RFC6544](https://www.rfc-editor.org/rfc/rfc6544), if asked for: passive and active candidates, framed as [RFC4571](https://www.rfc-editor.org/rfc/rfc4571) frames them, UDP preferred; simultaneous-open is not done
+1. The public addresses of a NAT of one to one - a cloud host's - of each socket's port: server reflexive candidates of a full agent, host candidates of a lite one
 1. Candidates as SDP carries them [RFC8839](https://www.rfc-editor.org/rfc/rfc8839), and peer reflexive ones learnt of the peer's checks
 1. The peer's candidates of mDNS names (".local"), as browsers hide their addresses behind, resolved of multicast DNS [RFC6762](https://www.rfc-editor.org/rfc/rfc6762); a peer reflexive candidate learnt first taking the type it is signalled of
 1. Its own addresses hidden alike, if asked to: host candidates of random names it answers mDNS queries of, server reflexive ones of no related address

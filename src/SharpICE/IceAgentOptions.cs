@@ -113,6 +113,15 @@ namespace SharpICE
         /// </summary>
         public bool MdnsCandidates { get; set; } = false;
 
+        /// <summary>
+        /// The public addresses of a host behind a NAT that maps each of its ports alike, one to one - a cloud host's, as its
+        /// provider tells them: each told of of the port of each socket and TCP listener of its family, as the NAT maps it. Of
+        /// a full agent, a server reflexive candidate of the socket's - of no STUN server to learn it of; of a lite one, a host
+        /// candidate, as a lite agent has those alone (RFC 8445 2.5). The ports are the sockets' own: of a NAT that forwards a
+        /// range, of <see cref="PortMin"/> and <see cref="PortMax"/>.
+        /// </summary>
+        public IList<IPAddress> PublicAddresses { get; set; } = new List<IPAddress>();
+
         /// <summary>The ports its sockets are bound to; any the system gives, of 0.</summary>
         public int PortMin { get; set; } = 0;
         public int PortMax { get; set; } = 0;

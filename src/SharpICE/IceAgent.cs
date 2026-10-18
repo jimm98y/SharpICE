@@ -411,8 +411,8 @@ namespace SharpICE
 
         /// <summary>
         /// Gathers the candidates (RFC 8445 5.1.1): a host candidate of each local address, of a socket bound to it; of TCP, a
-        /// passive and an active one of each; then - of a full agent - a server reflexive one of each STUN server that answers, of
-        /// each IPv4 socket. Each is told of as it is gathered too, to be trickled. Once only: the candidates of a second call are
+        /// passive and an active one of each; of each public address of the options, one of each socket's port; then - of a
+        /// full agent - a server reflexive one of each STUN server that answers, of each IPv4 socket. Each is told of as it is gathered too, to be trickled. Once only: the candidates of a second call are
         /// those of the first.
         /// </summary>
         public async Task<IReadOnlyList<IceCandidate>> GatherCandidatesAsync(CancellationToken cancellationToken = default)
@@ -475,6 +475,8 @@ namespace SharpICE
 
             if (_options.IncludeTcp && !_options.RelayOnly)
                 GatherTcp(addresses, gathered);
+            if (!_options.RelayOnly)
+                GatherPublic(gathered);
 
             // a lite agent is of host candidates alone (RFC 8445 2.5)
             if (_options.IncludeUdp && !IsLite && !_options.RelayOnly)
@@ -502,6 +504,62 @@ namespace SharpICE
             gathered.Add(local.Candidate);
             Trace($"Gathered {local.Candidate}");
             CandidateGathered?.Invoke(this, local.Candidate);
+        }
+
+        // the public addresses of a NAT of one to one: of each socket and passive listener of the family, a candidate of the
+        // address and the base's port - of a full agent server reflexive, of a lite one a host candidate (RFC 8445 2.5)
+        private void GatherPublic(List<IceCandidate> gathered)
+        {
+            var addresses = _options.PublicAddresses;
+            if (addresses == null || addresses.Count == 0)
+                return;
+            List<LocalBase> bases;
+            lock (_sync)
+                bases = _bases.Where(b => (b.Socket != null || b.Listener != null) && !IPAddress.IsLoopback(b.EndPoint.Address)).ToList();
+
+            var type = IsLite ? IceCandidateType.Host : IceCandidateType.ServerReflexive;
+            int index = 0;
+            foreach (var address in addresses)
+            {
+                foreach (var local in bases)
+                {
+                    // of the family's bases; of an address that is the base's own, no NAT: nothing to tell of
+                    if (local.EndPoint.AddressFamily != address.AddressFamily || local.EndPoint.Address.Equals(address))
+                        continue;
+                    bool tcp = local.Listener != null;
+                    string text = address.ToString();
+                    lock (_sync)
+                    {
+                        if (_localCandidates.Any(c => c.Address == text && c.Port == local.EndPoint.Port && c.Transport == local.Candidate.Transport))
+                            continue;
+                    }
+                    // of a host candidate, one below its base's, that no two are of one priority
+                    int preference = type == IceCandidateType.Host ? Math.Max(0, local.Candidate.LocalPreference - 1) : local.Candidate.LocalPreference;
+                    var candidate = new IceCandidate
+                    {
+                        Foundation = "p" + (++index).ToString(CultureInfo.InvariantCulture),
+                        Component = IceCandidate.RtpComponent,
+                        Transport = local.Candidate.Transport,
+                        Priority = IceCandidate.ComputePriority(type, preference, IceCandidate.RtpComponent, tcp),
+                        Address = text,
+                        Port = local.EndPoint.Port,
+                        Type = type,
+                    };
+                    if (type == IceCandidateType.ServerReflexive)
+                    {
+                        // of mDNS candidates, no address of the host's (draft-ietf-mmusic-mdns-ice-candidates 3.1.2.2)
+                        candidate.RelatedAddress = _mdns != null ? NoAddress(address.AddressFamily) : local.EndPoint.Address.ToString();
+                        candidate.RelatedPort = _mdns != null ? 0 : local.EndPoint.Port;
+                    }
+                    if (tcp)
+                        candidate.TcpType = IceCandidate.TcpPassive;
+                    lock (_sync)
+                        _localCandidates.Add(candidate);
+                    gathered.Add(candidate);
+                    Trace($"Gathered {candidate}");
+                    CandidateGathered?.Invoke(this, candidate);
+                }
+            }
         }
 
         private async Task GatherServerReflexiveAsync(List<IceCandidate> gathered, CancellationToken cancellationToken)
