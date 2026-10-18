@@ -670,9 +670,14 @@ namespace SharpStunCommon
         {
             isKnown ??= StunAttributeType.IsKnown;
             var unknown = new List<ushort>();
+            HashSet<ushort> seen = null;
             foreach (var attribute in Attributes)
             {
-                if (attribute.IsComprehensionRequired && !isKnown(attribute.Type) && !unknown.Contains(attribute.Type))
+                if (!attribute.IsComprehensionRequired || isKnown(attribute.Type))
+                    continue;
+                // of a set, as a message of thousands of attributes would make a list's scan of each quadratic
+                seen ??= new HashSet<ushort>();
+                if (seen.Add(attribute.Type))
                     unknown.Add(attribute.Type);
             }
             return unknown;

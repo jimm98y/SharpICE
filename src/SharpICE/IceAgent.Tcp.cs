@@ -150,10 +150,31 @@ namespace SharpICE
                         connection.Dispose();
                         return;
                     }
+                    if (_connections.Count >= _options.MaxTcpConnections)
+                    {
+                        Trace($"Connection from {connection.RemoteEndPoint} refused: {_options.MaxTcpConnections} already");
+                        connection.Dispose();
+                        continue;
+                    }
                     _connections.Add(connection);
                 }
                 Trace($"Connection from {connection.RemoteEndPoint} to {local.EndPoint}");
                 StartReceiving(local, connection);
+                _ = CloseUnpairedAsync(connection);
+            }
+        }
+
+        // a connection anyone made: of no pair of its checks - authenticated, each - in time, closed
+        private async Task CloseUnpairedAsync(IceTcpConnection connection)
+        {
+            await Task.Delay(_options.TcpCheckTimeout).ConfigureAwait(false);
+            bool paired;
+            lock (_sync)
+                paired = _closed || !_connections.Contains(connection) || _pairs.Any(p => p.Connection == connection) || SelectedPair?.Connection == connection;
+            if (!paired)
+            {
+                Trace($"Connection from {connection.RemoteEndPoint} closed: no check of it in {_options.TcpCheckTimeout.TotalSeconds}s");
+                connection.Dispose();
             }
         }
 
@@ -248,6 +269,8 @@ namespace SharpICE
         {
             _client = client;
             _client.NoDelay = true;
+            // a write to a peer that reads nothing ends, rather than holding the thread it blocks
+            _client.SendTimeout = 5000;
             _stream = client.GetStream();
             LocalEndPoint = IceAgent.Normalize((IPEndPoint)client.Client.LocalEndPoint);
             RemoteEndPoint = IceAgent.Normalize((IPEndPoint)client.Client.RemoteEndPoint);

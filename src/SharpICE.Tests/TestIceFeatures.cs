@@ -339,6 +339,8 @@ namespace SharpICE.Tests
                     AuthenticateBinding = false,
                 },
                 RelayAddress = IPAddress.Loopback,
+                // the peers of the tests are of the loopback
+                AllowPeer = peer => true,
             });
             uri = "turn:127.0.0.1:" + server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0)).Port;
             return server;

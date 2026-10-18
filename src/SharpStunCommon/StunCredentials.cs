@@ -114,7 +114,10 @@ namespace SharpStunCommon
                 return null;
             try
             {
+                // 4 characters of base64 of 3 bytes: of padding ("AA=="), fewer, which are no features
                 byte[] bits = Convert.FromBase64String(nonce.Substring(NonceCookie.Length, 4));
+                if (bits.Length != 3)
+                    return null;
                 return (StunSecurityFeatures)(bits[0] << 16 | bits[1] << 8 | bits[2]);
             }
             catch (FormatException)

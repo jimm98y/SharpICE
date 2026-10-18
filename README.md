@@ -87,6 +87,7 @@ A TURN server of UDP allocations [RFC8656](https://www.rfc-editor.org/rfc/rfc865
 1. Permissions of 5 minutes, channels of 10, lifetimes of the default and the maximum; an allocation of TCP or TLS ended with its connection
 1. Data of the peers relayed of Data indications, or of ChannelData of a channel bound; Send indications and ChannelData of the client relayed to its peers
 1. The error responses of RFC 8656 19: 403, 437, 440, 441, 442, 443, 486, 508; a retransmitted Allocate answered again
+1. Safe of its defaults: a realm required, of no open relay unless asked for; peers of public unicast addresses alone - not the loopback, private, link-local or multicast ones, of `AllowPeer` otherwise - and never its own listeners; quotas of allocations, of each user and in all, and of permissions
 
 ICMP errors are not relayed, as the system does not say which peer they are of; TCP allocations [RFC6062](https://www.rfc-editor.org/rfc/rfc6062) are not done.
 
@@ -104,6 +105,7 @@ server.ListenTcp(new IPEndPoint(IPAddress.Any, 3478));
 An ICE agent - Interactive Connectivity Establishment [RFC8445](https://www.rfc-editor.org/rfc/rfc8445) - of one component, RTP and RTCP multiplexed on it and all media bundled, as WebRTC has it:
 1. Host candidates of the local addresses, a socket each, server reflexive ones of STUN servers, found of DNS SRV too, and relayed ones of TURN servers - of them alone, if asked to - a channel bound to the peer of a relayed pair selected
 1. ICE over TCP [RFC6544](https://www.rfc-editor.org/rfc/rfc6544), if asked for: passive and active candidates, framed as [RFC4571](https://www.rfc-editor.org/rfc/rfc4571) frames them, UDP preferred; simultaneous-open is not done
+1. The public addresses of a NAT of one to one - a cloud host's - of each socket's port: server reflexive candidates of a full agent, host candidates of a lite one
 1. Candidates as SDP carries them [RFC8839](https://www.rfc-editor.org/rfc/rfc8839), and peer reflexive ones learnt of the peer's checks
 1. The peer's candidates of mDNS names (".local"), as browsers hide their addresses behind, resolved of multicast DNS [RFC6762](https://www.rfc-editor.org/rfc/rfc6762); a peer reflexive candidate learnt first taking the type it is signalled of
 1. Its own addresses hidden alike, if asked to: host candidates of random names it answers mDNS queries of, server reflexive ones of no related address
