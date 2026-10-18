@@ -126,9 +126,9 @@ namespace SharpStunClient
 
         private readonly StunClientOptions _options;
         private readonly object _sync = new object();
-        private readonly Dictionary<string, Transaction> _transactions = new Dictionary<string, Transaction>();
-        private readonly List<IPEndPoint> _servers;
-        private readonly string _tlsHost;
+        private readonly Dictionary<StunTransactionKey, Transaction> _transactions = new Dictionary<StunTransactionKey, Transaction>();
+        private List<IPEndPoint> _servers = new List<IPEndPoint>();
+        private string _tlsHost;
         private StunTransport _transport;
         private bool _ownsTransport;
 
@@ -140,22 +140,24 @@ namespace SharpStunClient
         private StunPasswordAlgorithm _passwordAlgorithm;
         private bool _useUserhash;
 
-        /// <summary>A client of a transport the caller keeps: not disposed with it.</summary>
-        public StunClient(StunTransport transport, StunClientOptions options = null)
-            : this(transport ?? throw new ArgumentNullException(nameof(transport)), options, false, null, null)
-        {
-        }
-
-        private StunClient(StunTransport transport, StunClientOptions options, bool ownsTransport, List<IPEndPoint> servers, string tlsHost)
+        /// <summary>A client not yet connected: of <see cref="ConnectAsync"/>, to a server of a URI.</summary>
+        public StunClient(StunClientOptions options = null)
         {
             _options = options ?? new StunClientOptions();
-            _ownsTransport = ownsTransport;
-            _servers = servers ?? new List<IPEndPoint>();
-            _tlsHost = tlsHost;
-            Attach(transport);
         }
 
+        /// <summary>A client of a transport the caller keeps: not disposed with it.</summary>
+        public StunClient(StunTransport transport, StunClientOptions options = null) : this(options)
+        {
+            Attach(transport ?? throw new ArgumentNullException(nameof(transport)));
+        }
+
+        /// <summary>The transport to the server; null before the client is connected.</summary>
         public StunTransport Transport => _transport;
+
+        public bool IsConnected => _transport != null;
+
+        private StunTransport Connected => _transport ?? throw new InvalidOperationException("The client is not connected.");
 
         public StunClientOptions Options => _options;
 
@@ -175,11 +177,14 @@ namespace SharpStunClient
                 throw new ArgumentNullException(nameof(indication));
             if (indication.Class != StunMessageClass.Indication)
                 throw new ArgumentException("Of an indication.", nameof(indication));
-            return _transport.SendAsync(indication.ToBytes(null, false), cancellationToken);
+            return Connected.SendAsync(indication.ToBytes(null, false), cancellationToken);
         }
 
         /// <summary>Bytes as they are: of TURN, a ChannelData message.</summary>
-        public Task SendRawAsync(byte[] data, CancellationToken cancellationToken = default) => _transport.SendAsync(data, cancellationToken);
+        public Task SendRawAsync(byte[] data, CancellationToken cancellationToken = default) => Connected.SendAsync(data, cancellationToken);
+
+        /// <summary>Bytes of a buffer's part, the caller's again once the task completes: of TURN, ChannelData of a buffer of a pool.</summary>
+        public Task SendRawAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default) => Connected.SendAsync(buffer, offset, count, cancellationToken);
 
         /// <summary>Whether a request of the long-term credentials succeeded: the next ones are sent of them.</summary>
         public bool IsAuthenticated { get; private set; }
@@ -188,16 +193,19 @@ namespace SharpStunClient
         public string Realm => _realm;
 
         /// <summary>
-        /// A client of a server of a STUN or TURN URI (RFC 7064, RFC 7065): of an IP address, it; of a host name and a port,
+        /// Connects to a server of a STUN or TURN URI (RFC 7064, RFC 7065): of an IP address, it; of a host name and a port,
         /// its addresses; of a host name alone, its SRV records' (RFC 8489 8.1), else its addresses of the default port. Over
         /// UDP, of the first address, the others tried once it does not answer; over TCP and TLS, connected to the first
         /// that takes a connection, or of DTLS, an association. A "stuns" URI is of a host name, its certificate checked of it;
         /// of TLS, or of DTLS, of <see cref="StunClientOptions.UseDtls"/>.
         /// </summary>
         /// <exception cref="StunException">Of no address, or of none that takes a connection.</exception>
-        public static async Task<StunClient> ConnectAsync(string uri, StunClientOptions options = null, CancellationToken cancellationToken = default)
+        /// <exception cref="InvalidOperationException">Of a client connected already.</exception>
+        public async Task ConnectAsync(string uri, CancellationToken cancellationToken = default)
         {
-            options ??= new StunClientOptions();
+            if (_transport != null)
+                throw new InvalidOperationException("The client is connected already.");
+            var options = _options;
             var parsed = StunUri.Parse(uri);
             if (parsed.IsSecure && parsed.Address != null)
                 throw new StunException($"Of {uri}: a secure URI is of a host name, which the server's certificate is checked of (RFC 8489 8.1).");
@@ -208,7 +216,10 @@ namespace SharpStunClient
                 throw new StunException($"{uri} resolves to no address.");
 
             if (protocol == "udp" && !parsed.IsSecure)
-                return new StunClient(new StunUdpTransport(servers[0]), options, true, servers.Skip(1).ToList(), null);
+            {
+                Connect(new StunUdpTransport(servers[0]), servers.Skip(1).ToList(), null);
+                return;
+            }
 
             string tlsHost = parsed.IsSecure ? parsed.Host : null;
             bool dtls = protocol == "udp";
@@ -220,7 +231,8 @@ namespace SharpStunClient
                     StunTransport transport = dtls
                         ? await StunDtlsTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, cancellationToken).ConfigureAwait(false)
                         : await StunStreamTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, cancellationToken).ConfigureAwait(false);
-                    return new StunClient(transport, options, true, servers.Skip(i + 1).ToList(), tlsHost);
+                    Connect(transport, servers.Skip(i + 1).ToList(), tlsHost);
+                    return;
                 }
                 catch (Exception e) when (IsConnectionFailure(e))
                 {
@@ -228,6 +240,15 @@ namespace SharpStunClient
                 }
             }
             throw new StunException($"No server of {uri} takes a connection.", null, last);
+        }
+
+        // of a transport of the client's own, the URI's other servers to try after it
+        private void Connect(StunTransport transport, List<IPEndPoint> servers, string tlsHost)
+        {
+            _servers = servers;
+            _tlsHost = tlsHost;
+            _ownsTransport = true;
+            Attach(transport);
         }
 
         private static bool IsConnectionFailure(Exception e) => e is SocketException || e is IOException || e is AuthenticationException;
@@ -250,7 +271,7 @@ namespace SharpStunClient
             if (request.Class != StunMessageClass.Request)
                 throw new ArgumentException("A transaction is of a request.", nameof(request));
 
-            var visited = new List<IPEndPoint> { _transport.RemoteEndPoint };
+            var visited = new List<IPEndPoint> { Connected.RemoteEndPoint };
             for (int attempt = 0; attempt < MaxAttempts; attempt++)
             {
                 // the first attempt of the request's own transaction ID, each after it - a new transaction - of a new one
@@ -376,7 +397,7 @@ namespace SharpStunClient
             var transport = _transport;
             byte[] bytes = message.ToBytes(key, integrity);
             var transaction = new Transaction { Key = key, Reliable = transport.IsReliable };
-            string id = Convert.ToBase64String(message.TransactionId);
+            var id = new StunTransactionKey(message.TransactionId);
             lock (_sync)
                 _transactions[id] = transaction;
 
@@ -432,7 +453,7 @@ namespace SharpStunClient
             Transaction transaction;
             lock (_sync)
             {
-                if (!_transactions.TryGetValue(Convert.ToBase64String(message.TransactionId), out transaction))
+                if (!_transactions.TryGetValue(new StunTransactionKey(message.TransactionId), out transaction))
                     return;
             }
             if (message.HasFingerprint && !message.VerifyFingerprint())
@@ -632,6 +653,8 @@ namespace SharpStunClient
         public void Dispose()
         {
             OnClosed(this, null);
+            if (_transport == null)
+                return;
             _transport.MessageReceived -= OnMessageReceived;
             _transport.DataReceived -= OnDataReceived;
             _transport.Closed -= OnClosed;

@@ -107,9 +107,11 @@ namespace SharpStunClient
 
         public override IPEndPoint LocalEndPoint => (IPEndPoint)_socket.LocalEndPoint;
 
-        public override Task SendAsync(byte[] message, CancellationToken cancellationToken = default)
+        public override Task SendAsync(byte[] message, CancellationToken cancellationToken = default) => SendAsync(message, 0, message.Length, cancellationToken);
+
+        public override Task SendAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
         {
-            _dtls.Send(message, 0, message.Length);
+            _dtls.Send(buffer, offset, count);
             return Task.CompletedTask;
         }
 
@@ -216,11 +218,22 @@ namespace SharpStunClient
 
         public int Receive(byte[] buf, int off, int len, int waitMillis)
         {
+#if NETCOREAPP
+            return Receive(buf.AsSpan(off, len), waitMillis);
+        }
+
+        public int Receive(Span<byte> buffer, int waitMillis)
+        {
+#endif
             try
             {
                 if (!_socket.Poll(Math.Max(1, waitMillis) * 1000, SelectMode.SelectRead))
                     return -1;
+#if NETCOREAPP
+                return _socket.Receive(buffer, SocketFlags.None);
+#else
                 return _socket.Receive(buf, off, len, SocketFlags.None);
+#endif
             }
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset || ex.SocketErrorCode == SocketError.ConnectionRefused)
             {
@@ -236,16 +249,7 @@ namespace SharpStunClient
         public void Send(byte[] buf, int off, int len) => _socket.Send(buf, off, len, SocketFlags.None);
 
 #if NETCOREAPP
-        public int Receive(Span<byte> buffer, int waitMillis)
-        {
-            byte[] array = new byte[buffer.Length];
-            int count = Receive(array, 0, array.Length, waitMillis);
-            if (count > 0)
-                array.AsSpan(0, count).CopyTo(buffer);
-            return count;
-        }
-
-        public void Send(ReadOnlySpan<byte> buffer) => Send(buffer.ToArray(), 0, buffer.Length);
+        public void Send(ReadOnlySpan<byte> buffer) => _socket.Send(buffer, SocketFlags.None);
 #endif
 
         public void Close()

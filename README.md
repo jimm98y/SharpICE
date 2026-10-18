@@ -25,14 +25,16 @@ A STUN client, of SharpStunCommon:
 
 ```cs
 // a server of a URI: of its SRV records, of UDP, TCP or TLS
-using var client = await StunClient.ConnectAsync("stuns:stun.example.org", new StunClientOptions { Username = "user", Password = "pass" });
+using var client = new StunClient(new StunClientOptions { Username = "user", Password = "pass" });
+await client.ConnectAsync("stuns:stun.example.org");
 IPEndPoint mapped = await client.GetMappedAddressAsync();
 
 // any request, sent again of the credentials as the server asks for them
 StunMessage response = await client.RequestAsync(new StunMessage(StunMethod.Binding, StunMessageClass.Request));
 
 // of DTLS rather than TLS
-using var dtls = await StunClient.ConnectAsync("stuns:stun.example.org", new StunClientOptions { UseDtls = true });
+using var dtls = new StunClient(new StunClientOptions { UseDtls = true });
+await dtls.ConnectAsync("stuns:stun.example.org");
 
 // the Binding method alone, of a socket
 var server = await StunClient.ResolveAsync("stun.l.google.com:19302");
@@ -70,7 +72,8 @@ A TURN client - Traversal Using Relays around NAT [RFC8656](https://www.rfc-edit
 1. TURN URIs [RFC7065](https://www.rfc-editor.org/rfc/rfc7065) and their SRV records
 
 ```cs
-using var turn = await TurnClient.ConnectAsync("turn:turn.example.org?transport=udp", new StunClientOptions { Username = "user", Password = "pass" });
+using var turn = new TurnClient(new StunClientOptions { Username = "user", Password = "pass" });
+await turn.ConnectAsync("turn:turn.example.org?transport=udp");
 await turn.AllocateAsync();
 turn.DataReceived += (s, e) => { /* e.Peer, e.Data */ };
 await turn.SendAsync(peer, data);          // a permission first, then a Send indication

@@ -75,7 +75,8 @@ namespace SharpICE.Tests
             });
             var dtls = server.ListenDtls(new IPEndPoint(IPAddress.Loopback, 0));
 
-            using var client = await StunClient.ConnectAsync("stuns:localhost:" + dtls.Port, DtlsOptions());
+            using var client = new StunClient(DtlsOptions());
+            await client.ConnectAsync("stuns:localhost:" + dtls.Port);
 
             Assert.IsInstanceOfType<StunDtlsTransport>(client.Transport);
             Assert.IsFalse(client.Transport.IsReliable, "retransmitted, as over UDP");
@@ -93,7 +94,7 @@ namespace SharpICE.Tests
             var options = DtlsOptions();
             options.CertificateValidation = null;
 
-            await Assert.ThrowsExactlyAsync<StunException>(() => StunClient.ConnectAsync("stuns:localhost:" + dtls.Port, options));
+            await Assert.ThrowsExactlyAsync<StunException>(() => new StunClient(options).ConnectAsync("stuns:localhost:" + dtls.Port));
         }
 
         [TestMethod]

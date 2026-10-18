@@ -22,8 +22,14 @@
 using Org.BouncyCastle.Security;
 using Org.BouncyCastle.Tls;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
+#if NET8_0_OR_GREATER
+using ReadTask = System.Threading.Tasks.ValueTask<bool>;
+#else
+using ReadTask = System.Threading.Tasks.Task<bool>;
+#endif
 using SharpStunCommon;
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -57,15 +63,30 @@ namespace SharpStunServer
     /// </summary>
     public sealed class StunServerConnection
     {
-        private readonly Action<byte[]> _send;
+        private readonly Action<byte[], int, int> _send;
 
         public StunServerConnection(StunServerProtocol protocol, IPEndPoint localEndPoint, IPEndPoint remoteEndPoint, Action<byte[]> send)
+            : this(protocol, localEndPoint, remoteEndPoint, (buffer, offset, count) => send(Whole(buffer, offset, count)))
+        {
+        }
+
+        /// <summary>A 5-tuple of what sends the bytes of a buffer's part, the caller's again once it returns.</summary>
+        public StunServerConnection(StunServerProtocol protocol, IPEndPoint localEndPoint, IPEndPoint remoteEndPoint, Action<byte[], int, int> send)
         {
             Protocol = protocol;
             LocalEndPoint = localEndPoint;
             RemoteEndPoint = remoteEndPoint;
             _send = send;
             Key = protocol + " " + localEndPoint + " " + remoteEndPoint;
+        }
+
+        private static byte[] Whole(byte[] buffer, int offset, int count)
+        {
+            if (offset == 0 && count == buffer.Length)
+                return buffer;
+            byte[] copy = new byte[count];
+            Buffer.BlockCopy(buffer, offset, copy, 0, count);
+            return copy;
         }
 
         public StunServerProtocol Protocol { get; }
@@ -82,11 +103,14 @@ namespace SharpStunServer
         public bool IsStream => Protocol == StunServerProtocol.Tcp || Protocol == StunServerProtocol.Tls;
 
         /// <summary>Sends the bytes to the client; false of a connection that ended.</summary>
-        public bool Send(byte[] data)
+        public bool Send(byte[] data) => Send(data, 0, data.Length);
+
+        /// <summary>Sends the bytes of a buffer's part to the client, the caller's again once it returns; false of a connection that ended.</summary>
+        public bool Send(byte[] buffer, int offset, int count)
         {
             try
             {
-                _send(data);
+                _send(buffer, offset, count);
                 return true;
             }
             catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is TlsException)
@@ -297,15 +321,16 @@ namespace SharpStunServer
         private async Task ServeDtlsAsync(Socket socket, BcTlsCrypto crypto, DtlsCredentials credentials)
         {
             var verifier = new DtlsVerifier(crypto);
-            var peers = new ConcurrentDictionary<string, QueuedDatagramTransport>();
+            var peers = new ConcurrentDictionary<IPEndPoint, QueuedDatagramTransport>();
             byte[] buffer = new byte[65536];
-            var any = new IPEndPoint(socket.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+            var receiver = new UdpReceiver(socket);
+            var sender = new UdpSender(socket);
             while (!_cts.IsCancellationRequested)
             {
-                SocketReceiveFromResult result;
+                int received;
                 try
                 {
-                    result = await socket.ReceiveFromAsync(new ArraySegment<byte>(buffer), SocketFlags.None, any).ConfigureAwait(false);
+                    received = await receiver.ReceiveAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
                 }
                 catch (SocketException)
                 {
@@ -316,21 +341,19 @@ namespace SharpStunServer
                     break;
                 }
 
-                var from = (IPEndPoint)result.RemoteEndPoint;
-                string id = from.ToString();
-                byte[] datagram = new byte[result.ReceivedBytes];
-                Buffer.BlockCopy(buffer, 0, datagram, 0, datagram.Length);
-                if (peers.TryGetValue(id, out var peer))
+                var from = receiver.RemoteEndPoint;
+                if (peers.TryGetValue(from, out var peer))
                 {
-                    peer.Enqueue(datagram);
+                    peer.Enqueue(buffer, 0, received);
                     continue;
                 }
 
                 // a peer of no association: its ClientHello of the verifier's cookie, else a HelloVerifyRequest of one back
+                string id = from.ToString();
                 DtlsRequest request;
                 try
                 {
-                    request = verifier.VerifyRequest(Encoding.UTF8.GetBytes(id), datagram, 0, datagram.Length, new QueuedDatagramTransport(socket, from));
+                    request = verifier.VerifyRequest(Encoding.UTF8.GetBytes(id), buffer, 0, received, new QueuedDatagramTransport(sender, from));
                 }
                 catch (Exception ex) when (ex is IOException || ex is SocketException || ex is TlsException)
                 {
@@ -339,17 +362,24 @@ namespace SharpStunServer
                 }
                 if (request == null)
                     continue;
-                peer = new QueuedDatagramTransport(socket, from);
-                if (!peers.TryAdd(id, peer))
+                peer = new QueuedDatagramTransport(sender, from);
+                if (!peers.TryAdd(from, peer))
                     continue;
-                var thread = new Thread(() => ServeDtlsPeer(peer, request, from, crypto, credentials, peers, id)) { IsBackground = true, Name = "STUN over DTLS " + id };
-                thread.Start();
+                StartDtlsPeer(peer, request, from, crypto, credentials, peers, id);
             }
             foreach (var peer in peers.Values)
                 peer.Close();
         }
 
-        private void ServeDtlsPeer(QueuedDatagramTransport peer, DtlsRequest request, IPEndPoint from, BcTlsCrypto crypto, DtlsCredentials credentials, ConcurrentDictionary<string, QueuedDatagramTransport> peers, string id)
+        // a thread of the peer's association: of a method of its own, as a lambda in the loop over the datagrams would make the
+        // compiler allocate its closure at each of them
+        private void StartDtlsPeer(QueuedDatagramTransport peer, DtlsRequest request, IPEndPoint from, BcTlsCrypto crypto, DtlsCredentials credentials, ConcurrentDictionary<IPEndPoint, QueuedDatagramTransport> peers, string id)
+        {
+            var thread = new Thread(() => ServeDtlsPeer(peer, request, from, crypto, credentials, peers)) { IsBackground = true, Name = "STUN over DTLS " + id };
+            thread.Start();
+        }
+
+        private void ServeDtlsPeer(QueuedDatagramTransport peer, DtlsRequest request, IPEndPoint from, BcTlsCrypto crypto, DtlsCredentials credentials, ConcurrentDictionary<IPEndPoint, QueuedDatagramTransport> peers)
         {
             DtlsTransport dtls = null;
             StunServerConnection connection = null;
@@ -359,10 +389,10 @@ namespace SharpStunServer
                 Trace($"DTLS of {from}");
                 var association = dtls;
                 var writing = new object();
-                connection = new StunServerConnection(StunServerProtocol.Dtls, peer.LocalEndPoint, from, data =>
+                connection = new StunServerConnection(StunServerProtocol.Dtls, peer.LocalEndPoint, from, (data, offset, length) =>
                 {
                     lock (writing)
-                        association.Send(data, 0, data.Length);
+                        association.Send(data, offset, length);
                 });
                 byte[] buffer = new byte[65536];
                 while (!_cts.IsCancellationRequested)
@@ -390,7 +420,7 @@ namespace SharpStunServer
                 catch (Exception ex) when (ex is IOException || ex is SocketException || ex is TlsException || ex is ObjectDisposedException)
                 {
                 }
-                peers.TryRemove(id, out _);
+                peers.TryRemove(from, out _);
                 peer.Close();
                 if (connection != null)
                     ConnectionClosed?.Invoke(this, connection);
@@ -409,17 +439,26 @@ namespace SharpStunServer
             return bound;
         }
 
+        private const int MaxUdpConnections = 4096;
+
+        // of a method of its own, as a lambda in the loop over the datagrams would make the compiler allocate its closure at each
+        private static StunServerConnection UdpConnection(IPEndPoint local, IPEndPoint remote, UdpSender sender)
+            => new StunServerConnection(StunServerProtocol.Udp, local, remote, (data, offset, count) => sender.SendTo(data, offset, count, remote));
+
         private async Task ServeUdpAsync(Socket socket)
         {
             var local = (IPEndPoint)socket.LocalEndPoint;
             byte[] buffer = new byte[65536];
-            var any = new IPEndPoint(socket.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+            var receiver = new UdpReceiver(socket);
+            var sender = new UdpSender(socket);
+            // a connection of each client's 5-tuple, made once: past these, made again, as of a server of many clients
+            var connections = new Dictionary<IPEndPoint, StunServerConnection>();
             while (!_cts.IsCancellationRequested)
             {
-                SocketReceiveFromResult result;
+                int received;
                 try
                 {
-                    result = await socket.ReceiveFromAsync(new ArraySegment<byte>(buffer), SocketFlags.None, any).ConfigureAwait(false);
+                    received = await receiver.ReceiveAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
                 }
                 catch (SocketException)
                 {
@@ -431,9 +470,15 @@ namespace SharpStunServer
                     return;
                 }
 
-                var remote = Normalize((IPEndPoint)result.RemoteEndPoint);
-                var connection = new StunServerConnection(StunServerProtocol.Udp, local, remote, data => socket.SendTo(data, remote));
-                Receive(connection, buffer, 0, result.ReceivedBytes);
+                var remote = receiver.RemoteEndPoint;
+                if (!connections.TryGetValue(remote, out var connection))
+                {
+                    if (connections.Count >= MaxUdpConnections)
+                        connections.Clear();
+                    connection = UdpConnection(local, remote, sender);
+                    connections[remote] = connection;
+                }
+                Receive(connection, buffer, 0, received);
             }
         }
 
@@ -479,36 +524,42 @@ namespace SharpStunServer
                     using (stream)
                     {
                         var writing = new object();
-                        connection = new StunServerConnection(tls ? StunServerProtocol.Tls : StunServerProtocol.Tcp, local, from, data =>
+                        connection = new StunServerConnection(tls ? StunServerProtocol.Tls : StunServerProtocol.Tcp, local, from, (data, offset, count) =>
                         {
                             lock (writing)
-                                stream.Write(data, 0, data.Length);
+                                stream.Write(data, offset, count);
                         });
-                        byte[] header = new byte[StunMessage.HeaderLength];
-                        while (!_cts.IsCancellationRequested)
+                        // the connection's one buffer, of a pool, of the longest message there is: a STUN message's header and
+                        // 65535 bytes
+                        byte[] buffer = ArrayPool<byte>.Shared.Rent(StunMessage.HeaderLength + ushort.MaxValue);
+                        try
                         {
-                            if (!await ReadAsync(stream, header, 0, 4).ConfigureAwait(false))
-                                return;
-                            if (StunFraming.IsChannelData(header[0]))
+                            while (!_cts.IsCancellationRequested)
                             {
-                                int dataLength = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
-                                byte[] channelData = new byte[4 + ((dataLength + 3) & ~3)];
-                                Buffer.BlockCopy(header, 0, channelData, 0, 4);
-                                if (!await ReadAsync(stream, channelData, 4, channelData.Length - 4).ConfigureAwait(false))
+                                if (!await ReadAsync(stream, buffer, 0, 4).ConfigureAwait(false))
                                     return;
-                                Receive(connection, channelData, 0, 4 + dataLength);
-                                continue;
+                                if (StunFraming.IsChannelData(buffer[0]))
+                                {
+                                    int dataLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(2));
+                                    if (!await ReadAsync(stream, buffer, 4, (dataLength + 3) & ~3).ConfigureAwait(false))
+                                        return;
+                                    Receive(connection, buffer, 0, 4 + dataLength);
+                                    continue;
+                                }
+                                if (!await ReadAsync(stream, buffer, 4, StunMessage.HeaderLength - 4).ConfigureAwait(false))
+                                    return;
+                                if ((buffer[0] & 0xC0) != 0 || BinaryPrimitives.ReadUInt32BigEndian(buffer.AsSpan(4)) != StunMessage.MagicCookie)
+                                    return;
+                                int length = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(2));
+                                if (!await ReadAsync(stream, buffer, StunMessage.HeaderLength, length).ConfigureAwait(false))
+                                    return;
+                                Receive(connection, buffer, 0, StunMessage.HeaderLength + length);
                             }
-                            if (!await ReadAsync(stream, header, 4, header.Length - 4).ConfigureAwait(false))
-                                return;
-                            if ((header[0] & 0xC0) != 0 || BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(4)) != StunMessage.MagicCookie)
-                                return;
-                            int length = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
-                            byte[] message = new byte[header.Length + length];
-                            Buffer.BlockCopy(header, 0, message, 0, header.Length);
-                            if (!await ReadAsync(stream, message, header.Length, length).ConfigureAwait(false))
-                                return;
-                            Receive(connection, message, 0, message.Length);
+                        }
+                        finally
+                        {
+                            // of what TLS decrypted: cleared, before the pool hands it to anything else
+                            ArrayPool<byte>.Shared.Return(buffer, true);
                         }
                     }
                 }
@@ -524,11 +575,18 @@ namespace SharpStunServer
             }
         }
 
-        private static async Task<bool> ReadAsync(Stream stream, byte[] buffer, int offset, int count)
+#if NET8_0_OR_GREATER
+        [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+#endif
+        private static async ReadTask ReadAsync(Stream stream, byte[] buffer, int offset, int count)
         {
             while (count > 0)
             {
+#if NET8_0_OR_GREATER
+                int read = await stream.ReadAsync(buffer.AsMemory(offset, count)).ConfigureAwait(false);
+#else
                 int read = await stream.ReadAsync(buffer, offset, count).ConfigureAwait(false);
+#endif
                 if (read == 0)
                     return false;
                 offset += read;

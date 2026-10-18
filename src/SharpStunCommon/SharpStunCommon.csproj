@@ -10,6 +10,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="SharpStunClient" />
     <InternalsVisibleTo Include="SharpStunServer" />
+    <InternalsVisibleTo Include="SharpTurnServer" />
     <InternalsVisibleTo Include="SharpICE" />
     <InternalsVisibleTo Include="SharpICE.Tests" />
   </ItemGroup>

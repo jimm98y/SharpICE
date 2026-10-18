@@ -23,6 +23,7 @@ using SharpStunClient;
 using SharpStunCommon;
 using SharpTurnCommon;
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
@@ -74,14 +75,35 @@ namespace SharpTurnClient
     /// <summary>Data a peer sent the relayed address, and which peer.</summary>
     public sealed class TurnDataEventArgs : EventArgs
     {
-        public TurnDataEventArgs(IPEndPoint peer, byte[] data)
+        internal TurnDataEventArgs()
         {
-            Peer = peer;
-            Data = data;
         }
 
-        public IPEndPoint Peer { get; }
-        public byte[] Data { get; }
+        public TurnDataEventArgs(IPEndPoint peer, byte[] buffer, int offset, int count) => Set(peer, buffer, offset, count);
+
+        internal TurnDataEventArgs Set(IPEndPoint peer, byte[] buffer, int offset, int count)
+        {
+            Peer = peer;
+            Buffer = buffer;
+            Offset = offset;
+            Count = count;
+            return this;
+        }
+
+        public IPEndPoint Peer { get; private set; }
+
+        /// <summary>The buffer the data is in: the client's own again once the event returns, as are these arguments.</summary>
+        public byte[] Buffer { get; private set; }
+        public int Offset { get; private set; }
+        public int Count { get; private set; }
+
+        /// <summary>A copy of the data, to keep.</summary>
+        public byte[] ToArray()
+        {
+            byte[] data = new byte[Count];
+            System.Buffer.BlockCopy(Buffer, Offset, data, 0, Count);
+            return data;
+        }
     }
 
     /// <summary>An ICMP error of a datagram the server relayed to a peer (RFC 8656 11.6): its type and code.</summary>
@@ -127,6 +149,8 @@ namespace SharpTurnClient
         private readonly Dictionary<ushort, ChannelState> _channels = new Dictionary<ushort, ChannelState>();
         private readonly List<IPEndPoint> _relayed = new List<IPEndPoint>();
         private ushort _nextChannel = TurnConstants.MinChannel;
+        // of the transport's one receiving loop: told of again of each datagram
+        private readonly TurnDataEventArgs _dataArgs = new TurnDataEventArgs();
         private DateTime _expires;
         private Timer _timer;
         private int _maintaining;
@@ -146,20 +170,30 @@ namespace SharpTurnClient
         }
 
         /// <summary>
-        /// A client of a server of a TURN URI (RFC 7065): "turn:host[:port][?transport=udp|tcp]" or "turns:..." of TLS - or DTLS,
-        /// of "?transport=udp" - as <see cref="StunClient.ConnectAsync"/> connects; its credentials of the options given, SHA-256
-        /// preferred of them.
+        /// A client not yet connected, of a STUN client of its own: of <see cref="ConnectAsync"/>, to a server of a TURN URI; its
+        /// credentials of the options given, SHA-256 preferred of them.
         /// </summary>
-        public static async Task<TurnClient> ConnectAsync(string uri, StunClientOptions options, CancellationToken cancellationToken = default)
+        public TurnClient(StunClientOptions options) : this(new StunClient(Prefer(options)), true)
+        {
+        }
+
+        private static StunClientOptions Prefer(StunClientOptions options)
         {
             if (options == null)
                 throw new ArgumentNullException(nameof(options));
+            options.PreferSha256 = true;
+            return options;
+        }
+
+        /// <summary>
+        /// Connects to a server of a TURN URI (RFC 7065): "turn:host[:port][?transport=udp|tcp]" or "turns:..." of TLS - or DTLS,
+        /// of "?transport=udp" - as <see cref="StunClient.ConnectAsync"/> connects.
+        /// </summary>
+        public Task ConnectAsync(string uri, CancellationToken cancellationToken = default)
+        {
             if (!StunUri.Parse(uri).IsTurn)
                 throw new ArgumentException($"{uri} is no TURN URI.", nameof(uri));
-            options.PreferSha256 = true;
-            options.IsKnownAttribute = TurnAttributeType.IsKnownOfTurn;
-            var client = await StunClient.ConnectAsync(uri, options, cancellationToken).ConfigureAwait(false);
-            return new TurnClient(client, true);
+            return _client.ConnectAsync(uri, cancellationToken);
         }
 
         public StunClient Client => _client;
@@ -396,7 +430,66 @@ namespace SharpTurnClient
         {
             peer = Normalize(peer);
             lock (_sync)
-                return _channels.Values.FirstOrDefault(c => c.Bound && c.Peer.Equals(peer))?.Number;
+                return BoundChannelOf(peer)?.Number;
+        }
+
+        private ChannelState BoundChannelOf(IPEndPoint peer)
+        {
+            foreach (var channel in _channels.Values)
+            {
+                if (channel.Bound && channel.Peer.Equals(peer))
+                    return channel;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Sends data to the peer at once, of ChannelData of a channel bound to it and of a permission of its address, in a
+        /// buffer of a pool: false of none bound, as <see cref="SendAsync(IPEndPoint, byte[], int, int, bool, CancellationToken)"/>
+        /// binds none but sends a Send indication. The buffer is the caller's again once it returns.
+        /// </summary>
+        public bool TrySend(IPEndPoint peer, byte[] buffer, int offset, int count)
+        {
+            peer = Normalize(peer);
+            ushort number;
+            lock (_sync)
+            {
+                var channel = BoundChannelOf(peer);
+                if (channel == null || !_permissions.ContainsKey(peer.Address))
+                    return false;
+                number = channel.Number;
+            }
+            var transport = _client.Transport;
+            if (transport == null)
+                return false;
+            // over a stream, padded to 4 bytes (RFC 8656 12.5)
+            byte[] message = ArrayPool<byte>.Shared.Rent(StunFraming.ChannelDataSize(count, true));
+            int length = TurnChannelData.Write(message, number, new ReadOnlySpan<byte>(buffer, offset, count), transport.IsStream);
+            Task sent;
+            try
+            {
+                sent = transport.SendAsync(message, 0, length);
+            }
+            catch
+            {
+                ArrayPool<byte>.Shared.Return(message);
+                throw;
+            }
+            if (sent.IsCompleted)
+            {
+                ArrayPool<byte>.Shared.Return(message);
+                sent.GetAwaiter().GetResult();
+            }
+            else
+            {
+                // of a stream whose write waits: the buffer back to the pool once it is written
+                sent.ContinueWith((t, state) =>
+                {
+                    ArrayPool<byte>.Shared.Return((byte[])state);
+                    _ = t.Exception;
+                }, message, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+            return true;
         }
 
         #endregion // Permissions and channels
@@ -410,24 +503,24 @@ namespace SharpTurnClient
         public async Task SendAsync(IPEndPoint peer, byte[] buffer, int offset, int count, bool dontFragment = false, CancellationToken cancellationToken = default)
         {
             peer = Normalize(peer);
+            if (TrySend(peer, buffer, offset, count))
+                return;
             await EnsurePermissionAsync(peer.Address, cancellationToken).ConfigureAwait(false);
             ushort? channel = ChannelOf(peer);
-            if (channel.HasValue)
+            bool stream = _client.Transport.IsStream;
+            byte[] message = ArrayPool<byte>.Shared.Rent(Math.Max(StunFraming.ChannelDataSize(count, true), TurnIndication.Size(peer, count, dontFragment)));
+            try
             {
-                // over a stream, padded to 4 bytes (RFC 8656 12.5)
-                byte[] message = TurnChannelData.Create(channel.Value, buffer, offset, count, _client.Transport.IsStream);
-                await _client.SendRawAsync(message, cancellationToken).ConfigureAwait(false);
-                return;
+                // ChannelData, over a stream padded to 4 bytes (RFC 8656 12.5); else a Send indication
+                int length = channel.HasValue
+                    ? TurnChannelData.Write(message, channel.Value, new ReadOnlySpan<byte>(buffer, offset, count), stream)
+                    : TurnIndication.Write(message, TurnMethod.Send, peer, new ReadOnlySpan<byte>(buffer, offset, count), dontFragment);
+                await _client.SendRawAsync(message, 0, length, cancellationToken).ConfigureAwait(false);
             }
-
-            byte[] data = new byte[count];
-            Buffer.BlockCopy(buffer, offset, data, 0, count);
-            var indication = new StunMessage(TurnMethod.Send, StunMessageClass.Indication)
-                .AddXorAddress(peer, TurnAttributeType.XorPeerAddress)
-                .AddAttribute(TurnAttributeType.Data, data);
-            if (dontFragment)
-                indication.AddAttribute(TurnAttributeType.DontFragment, new byte[0]);
-            await _client.SendIndicationAsync(indication, cancellationToken).ConfigureAwait(false);
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(message);
+            }
         }
 
         public Task SendAsync(IPEndPoint peer, byte[] data, CancellationToken cancellationToken = default) => SendAsync(peer, data, 0, data.Length, false, cancellationToken);
@@ -449,7 +542,7 @@ namespace SharpTurnClient
             }
             var data = message.GetAttribute(TurnAttributeType.Data);
             if (data != null)
-                DataReceived?.Invoke(this, new TurnDataEventArgs(peer, data.Value));
+                DataReceived?.Invoke(this, _dataArgs.Set(peer, data.Value, 0, data.Value.Length));
         }
 
         // ChannelData: of a channel bound, of its peer (RFC 8656 12.6)
@@ -464,9 +557,7 @@ namespace SharpTurnClient
                     return;
                 peer = channel.Peer;
             }
-            byte[] data = new byte[length];
-            Buffer.BlockCopy(e.Buffer, dataOffset, data, 0, length);
-            DataReceived?.Invoke(this, new TurnDataEventArgs(peer, data));
+            DataReceived?.Invoke(this, _dataArgs.Set(peer, e.Buffer, dataOffset, length));
         }
 
         #endregion // Data
@@ -563,7 +654,7 @@ namespace SharpTurnClient
 
         private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
-        private static IPEndPoint Normalize(IPEndPoint endPoint) => new IPEndPoint(Normalize(endPoint.Address), endPoint.Port);
+        private static IPEndPoint Normalize(IPEndPoint endPoint) => endPoint.Address.IsIPv4MappedToIPv6 ? new IPEndPoint(endPoint.Address.MapToIPv4(), endPoint.Port) : endPoint;
 
         /// <summary>Stops refreshing; of a client it owns, deletes the allocation - waiting a second for it - and disposes the client.</summary>
         public void Dispose()

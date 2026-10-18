@@ -19,7 +19,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#if NET8_0_OR_GREATER
+using ReadTask = System.Threading.Tasks.ValueTask<bool>;
+#else
+using ReadTask = System.Threading.Tasks.Task<bool>;
+#endif
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -251,39 +257,46 @@ namespace SharpICE
 
         public IPEndPoint RemoteEndPoint { get; }
 
-        /// <summary>A packet, framed; false of one longer than a frame takes, or of the connection closed.</summary>
+        // of its one receiving loop: told of again of each packet
+        public readonly IceDataReceivedEventArgs Args = new IceDataReceivedEventArgs();
+
+        /// <summary>A packet, framed in a buffer of a pool; false of one longer than a frame takes, or of the connection closed.</summary>
         public bool Send(byte[] buffer, int offset, int count)
         {
             if (count > ushort.MaxValue)
                 return false;
-            byte[] frame = new byte[2 + count];
+            byte[] frame = ArrayPool<byte>.Shared.Rent(2 + count);
             frame[0] = (byte)(count >> 8);
             frame[1] = (byte)count;
             Buffer.BlockCopy(buffer, offset, frame, 2, count);
             try
             {
                 lock (_writing)
-                    _stream.Write(frame, 0, frame.Length);
+                    _stream.Write(frame, 0, 2 + count);
                 return true;
             }
             catch (Exception ex) when (ex is IOException || ex is ObjectDisposedException || ex is SocketException)
             {
                 return false;
             }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(frame);
+            }
         }
 
         /// <summary>Each packet as it comes, in a buffer that is its own again once the callback returns, until the connection closes.</summary>
         public async Task ReceiveAsync(Action<byte[], int> received)
         {
-            byte[] header = new byte[2];
-            byte[] buffer = new byte[ushort.MaxValue];
+            // the connection's one buffer, of a pool: of a frame's length, then of the frame
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(ushort.MaxValue);
             try
             {
                 while (true)
                 {
-                    if (!await ReadAsync(header, 2).ConfigureAwait(false))
+                    if (!await ReadAsync(buffer, 2).ConfigureAwait(false))
                         return;
-                    int length = header[0] << 8 | header[1];
+                    int length = buffer[0] << 8 | buffer[1];
                     if (!await ReadAsync(buffer, length).ConfigureAwait(false))
                         return;
                     received(buffer, length);
@@ -292,14 +305,26 @@ namespace SharpICE
             catch (Exception ex) when (ex is IOException || ex is ObjectDisposedException || ex is SocketException)
             {
             }
+            finally
+            {
+                // cleared, before the pool hands it to anything else
+                ArrayPool<byte>.Shared.Return(buffer, true);
+            }
         }
 
-        private async Task<bool> ReadAsync(byte[] buffer, int count)
+#if NET8_0_OR_GREATER
+        [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+#endif
+        private async ReadTask ReadAsync(byte[] buffer, int count)
         {
             int offset = 0;
             while (offset < count)
             {
+#if NET8_0_OR_GREATER
+                int read = await _stream.ReadAsync(buffer.AsMemory(offset, count - offset)).ConfigureAwait(false);
+#else
                 int read = await _stream.ReadAsync(buffer, offset, count - offset).ConfigureAwait(false);
+#endif
                 if (read == 0)
                     return false;
                 offset += read;

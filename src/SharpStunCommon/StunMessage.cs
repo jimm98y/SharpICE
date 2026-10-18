@@ -178,8 +178,7 @@ namespace SharpStunCommon
         public static byte[] NewTransactionId()
         {
             byte[] id = new byte[TransactionIdLength];
-            using (var random = RandomNumberGenerator.Create())
-                random.GetBytes(id);
+            StunWriter.NewTransactionId(id);
             return id;
         }
 

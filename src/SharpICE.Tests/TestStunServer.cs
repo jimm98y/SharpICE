@@ -246,8 +246,9 @@ namespace SharpICE.Tests
             var tcp = server.ListenTcp(new IPEndPoint(IPAddress.Loopback, 0));
             var tls = server.ListenTls(new IPEndPoint(IPAddress.Loopback, 0));
 
-            using (var client = await StunClient.ConnectAsync("stun:127.0.0.1:" + udp.Port, ClientOptions()))
+            using (var client = new StunClient(ClientOptions()))
             {
+                await client.ConnectAsync("stun:127.0.0.1:" + udp.Port);
                 Assert.AreEqual(client.Transport.LocalEndPoint.Port, (await client.GetMappedAddressAsync()).Port);
                 Assert.IsTrue(client.IsAuthenticated);
                 Assert.IsNotNull(await client.GetMappedAddressAsync(), "of the credentials at once");
@@ -257,13 +258,15 @@ namespace SharpICE.Tests
                 Assert.AreEqual(client.Transport.LocalEndPoint, await client.GetMappedAddressAsync());
                 Assert.IsTrue(client.IsAuthenticated);
             }
-            using (var client = await StunClient.ConnectAsync("stuns:localhost:" + tls.Port, ClientOptions()))
+            using (var client = new StunClient(ClientOptions()))
             {
+                await client.ConnectAsync("stuns:localhost:" + tls.Port);
                 Assert.AreEqual(client.Transport.LocalEndPoint, await client.GetMappedAddressAsync());
                 Assert.IsTrue(client.IsAuthenticated);
             }
-            using (var client = await StunClient.ConnectAsync("stun:127.0.0.1:" + udp.Port, ClientOptions("wrong")))
+            using (var client = new StunClient(ClientOptions("wrong")))
             {
+                await client.ConnectAsync("stun:127.0.0.1:" + udp.Port);
                 var response = await client.RequestAsync(StunClient.CreateBindingRequest());
                 Assert.AreEqual(StunErrorCode.Unauthorized, response.Error.Value.Code);
             }
@@ -276,7 +279,8 @@ namespace SharpICE.Tests
             options.NonceLifetime = TimeSpan.FromMilliseconds(300);
             using var server = new StunServer(options);
             var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
-            using var client = await StunClient.ConnectAsync("stun:127.0.0.1:" + udp.Port, ClientOptions());
+            using var client = new StunClient(ClientOptions());
+            await client.ConnectAsync("stun:127.0.0.1:" + udp.Port);
             Assert.IsNotNull(await client.GetMappedAddressAsync());
 
             await Task.Delay(400);
@@ -292,7 +296,8 @@ namespace SharpICE.Tests
             using var redirecting = new StunServer(new StunServerOptions { AlternateServer = from => to });
             var udp = redirecting.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
 
-            using var client = await StunClient.ConnectAsync("stun:127.0.0.1:" + udp.Port, ClientOptions());
+            using var client = new StunClient(ClientOptions());
+            await client.ConnectAsync("stun:127.0.0.1:" + udp.Port);
             Assert.IsNotNull(await client.GetMappedAddressAsync());
             Assert.AreEqual(to, client.Transport.RemoteEndPoint);
         }

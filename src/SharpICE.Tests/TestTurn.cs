@@ -85,7 +85,7 @@ namespace SharpICE.Tests
         private static BlockingCollection<(string, IPEndPoint)> Listen(TurnClient client)
         {
             var received = new BlockingCollection<(string, IPEndPoint)>();
-            client.DataReceived += (s, e) => received.Add((Encoding.UTF8.GetString(e.Data), e.Peer));
+            client.DataReceived += (s, e) => received.Add((Encoding.UTF8.GetString(e.Buffer, e.Offset, e.Count), e.Peer));
             return received;
         }
 
@@ -115,7 +115,8 @@ namespace SharpICE.Tests
         {
             using var server = new TurnServer(ServerOptions());
             var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
-            using var client = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
+            using var client = new TurnClient(ClientOptions());
+            await client.ConnectAsync("turn:127.0.0.1:" + udp.Port);
 
             await client.AllocateAsync();
 
@@ -143,7 +144,8 @@ namespace SharpICE.Tests
 
             foreach (string uri in new[] { $"turn:127.0.0.1:{tcp.Port}?transport=tcp", $"turns:localhost:{tls.Port}", $"turns:localhost:{dtls.Port}?transport=udp" })
             {
-                using var client = await TurnClient.ConnectAsync(uri, ClientOptions());
+                using var client = new TurnClient(ClientOptions());
+                await client.ConnectAsync(uri);
                 await client.AllocateAsync();
                 await RelaysBothWays(client);
             }
@@ -155,7 +157,8 @@ namespace SharpICE.Tests
         {
             using var server = new TurnServer(ServerOptions());
             var tcp = server.ListenTcp(new IPEndPoint(IPAddress.Loopback, 0));
-            var client = await TurnClient.ConnectAsync($"turn:127.0.0.1:{tcp.Port}?transport=tcp", ClientOptions());
+            var client = new TurnClient(ClientOptions());
+            await client.ConnectAsync($"turn:127.0.0.1:{tcp.Port}?transport=tcp");
             await client.AllocateAsync();
             Assert.AreEqual(1, server.AllocationCount);
 
@@ -172,7 +175,8 @@ namespace SharpICE.Tests
         {
             using var server = new TurnServer(ServerOptions());
             var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
-            using var client = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
+            using var client = new TurnClient(ClientOptions());
+            await client.ConnectAsync("turn:127.0.0.1:" + udp.Port);
             await client.AllocateAsync();
             var received = Listen(client);
             using var stranger = new Peer("127.0.0.2");
@@ -191,7 +195,8 @@ namespace SharpICE.Tests
         {
             using var server = new TurnServer(ServerOptions());
             var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
-            using var client = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
+            using var client = new TurnClient(ClientOptions());
+            await client.ConnectAsync("turn:127.0.0.1:" + udp.Port);
 
             // of none: 437
             var error = await Assert.ThrowsExactlyAsync<TurnException>(() => client.RefreshAsync());
@@ -212,7 +217,8 @@ namespace SharpICE.Tests
             options.MaxAllocationsPerUser = 1;
             using var server = new TurnServer(options);
             var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
-            using var client = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
+            using var client = new TurnClient(ClientOptions());
+            await client.ConnectAsync("turn:127.0.0.1:" + udp.Port);
 
             // of TCP to the peers, 442; of no REQUESTED-TRANSPORT, 400
             var tcp = new StunMessage(TurnMethod.Allocate, StunMessageClass.Request).AddAttribute(TurnAttributeType.RequestedTransport, new byte[] { 6, 0, 0, 0 });
@@ -226,7 +232,8 @@ namespace SharpICE.Tests
 
             // a second allocation of the user: 486
             await client.AllocateAsync();
-            using var second = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
+            using var second = new TurnClient(ClientOptions());
+            await second.ConnectAsync("turn:127.0.0.1:" + udp.Port);
             error = await Assert.ThrowsExactlyAsync<TurnException>(() => second.AllocateAsync());
             Assert.AreEqual(TurnErrorCode.AllocationQuotaReached, error.Code);
         }
@@ -278,7 +285,8 @@ namespace SharpICE.Tests
             using (var server = new TurnServer(options))
             {
                 var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
-                using var client = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
+                using var client = new TurnClient(ClientOptions());
+                await client.ConnectAsync("turn:127.0.0.1:" + udp.Port);
                 await client.AllocateAsync(new TurnAllocateOptions { Dual = true });
 
                 CollectionAssert.AreEquivalent(new[] { AddressFamily.InterNetwork, AddressFamily.InterNetworkV6 }, client.RelayedEndPoints.Select(e => e.AddressFamily).ToArray());
@@ -299,7 +307,8 @@ namespace SharpICE.Tests
             using (var server = new TurnServer(ServerOptions()))
             {
                 var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
-                using var client = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
+                using var client = new TurnClient(ClientOptions());
+                await client.ConnectAsync("turn:127.0.0.1:" + udp.Port);
                 await client.AllocateAsync(new TurnAllocateOptions { Dual = true });
 
                 Assert.AreEqual(1, client.RelayedEndPoints.Count, "of IPv4 alone");
@@ -312,18 +321,21 @@ namespace SharpICE.Tests
         {
             using var server = new TurnServer(ServerOptions());
             var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
-            using var first = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
+            using var first = new TurnClient(ClientOptions());
+            await first.ConnectAsync("turn:127.0.0.1:" + udp.Port);
             await first.AllocateAsync(new TurnAllocateOptions { EvenPort = true, ReserveNextPort = true });
 
             Assert.AreEqual(0, first.RelayedEndPoint.Port % 2);
             Assert.AreEqual(8, first.ReservationToken.Length);
 
-            using var second = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions("other"));
+            using var second = new TurnClient(ClientOptions("other"));
+            await second.ConnectAsync("turn:127.0.0.1:" + udp.Port);
             await second.AllocateAsync(new TurnAllocateOptions { ReservationToken = first.ReservationToken });
             Assert.AreEqual(first.RelayedEndPoint.Port + 1, second.RelayedEndPoint.Port);
 
             // a token used once is gone: 508
-            using var third = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions("other"));
+            using var third = new TurnClient(ClientOptions("other"));
+            await third.ConnectAsync("turn:127.0.0.1:" + udp.Port);
             var error = await Assert.ThrowsExactlyAsync<TurnException>(() => third.AllocateAsync(new TurnAllocateOptions { ReservationToken = first.ReservationToken }));
             Assert.AreEqual(TurnErrorCode.InsufficientCapacity, error.Code);
         }
@@ -336,12 +348,14 @@ namespace SharpICE.Tests
             options.MaxLifetime = TimeSpan.FromSeconds(8);
             using var server = new TurnServer(options);
             var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
-            using var kept = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions());
+            using var kept = new TurnClient(ClientOptions());
+            await kept.ConnectAsync("turn:127.0.0.1:" + udp.Port);
             await kept.AllocateAsync(new TurnAllocateOptions { Lifetime = TimeSpan.FromSeconds(3600) });
             Assert.AreEqual(TimeSpan.FromSeconds(8), kept.Lifetime, "the server's maximum");
 
             // an allocation of no client to refresh it: its socket gone, of no Refresh to delete it
-            using var left = await TurnClient.ConnectAsync("turn:127.0.0.1:" + udp.Port, ClientOptions("other"));
+            using var left = new TurnClient(ClientOptions("other"));
+            await left.ConnectAsync("turn:127.0.0.1:" + udp.Port);
             await left.AllocateAsync();
             left.Client.Transport.Dispose();
             Assert.AreEqual(2, server.AllocationCount);

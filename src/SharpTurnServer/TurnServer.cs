@@ -23,6 +23,7 @@ using SharpStunCommon;
 using SharpTurnCommon;
 using SharpStunServer;
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
@@ -112,6 +113,9 @@ namespace SharpTurnServer
         private sealed class Relay
         {
             public Socket Socket;
+            public UdpSender Sender;
+            // the DF bit the socket is of now: set again only as a Send indication's DONT-FRAGMENT changes it
+            public bool DontFragment;
             public IPEndPoint EndPoint;
             public IPEndPoint Advertised;
             public DateTime Expires;
@@ -138,9 +142,25 @@ namespace SharpTurnServer
             public readonly Dictionary<ushort, Channel> Channels = new Dictionary<ushort, Channel>();
             public bool Closed;
 
-            public Relay RelayOf(AddressFamily family) => Relays.FirstOrDefault(r => r.Family == family);
+            public Relay RelayOf(AddressFamily family)
+            {
+                foreach (var relay in Relays)
+                {
+                    if (relay.Family == family)
+                        return relay;
+                }
+                return null;
+            }
 
-            public Channel ChannelOf(IPEndPoint peer) => Channels.Values.FirstOrDefault(c => c.Peer.Equals(peer));
+            public Channel ChannelOf(IPEndPoint peer)
+            {
+                foreach (var channel in Channels.Values)
+                {
+                    if (channel.Peer.Equals(peer))
+                        return channel;
+                }
+                return null;
+            }
         }
 
         private sealed class Reservation
@@ -482,7 +502,7 @@ namespace SharpTurnServer
             var advertised = _options.AdvertisedRelayAddress != null && endPoint.AddressFamily == _options.AdvertisedRelayAddress.AddressFamily
                 ? new IPEndPoint(_options.AdvertisedRelayAddress, endPoint.Port)
                 : endPoint;
-            return new Relay { Socket = socket, EndPoint = endPoint, Advertised = advertised, Expires = expires };
+            return new Relay { Socket = socket, Sender = new UdpSender(socket), EndPoint = endPoint, Advertised = advertised, Expires = expires };
         }
 
         // a port of the range at random (RFC 6056), as RFC 8656 7.2 recommends
@@ -550,55 +570,64 @@ namespace SharpTurnServer
         // else of a Data indication (RFC 8656 11.3, 12.7)
         private async Task RelayAsync(Allocation allocation, Relay relay)
         {
-            byte[] buffer = new byte[65536];
-            var any = new IPEndPoint(relay.Family == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
-            while (true)
+            // the peer's data read past the room the header of a Data indication of IPv6 takes, the most of any, so that its
+            // ChannelData's header, or its Data indication's, is written before it where it is; of a buffer of a pool
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(RelayRoom + ushort.MaxValue + RelayRoom);
+            var receiver = new UdpReceiver(relay.Socket);
+            try
             {
-                SocketReceiveFromResult result;
-                try
+                while (true)
                 {
-                    result = await relay.Socket.ReceiveFromAsync(new ArraySegment<byte>(buffer), SocketFlags.None, any).ConfigureAwait(false);
-                }
-                catch (SocketException)
-                {
-                    continue;
-                }
-                catch (ObjectDisposedException)
-                {
-                    return;
-                }
-
-                var peer = (IPEndPoint)result.RemoteEndPoint;
-                if (peer.Address.IsIPv4MappedToIPv6)
-                    peer = new IPEndPoint(peer.Address.MapToIPv4(), peer.Port);
-                Channel channel;
-                lock (_sync)
-                {
-                    if (allocation.Closed || !allocation.Permissions.TryGetValue(peer.Address, out DateTime until) || until < DateTime.UtcNow)
+                    int count;
+                    try
+                    {
+                        count = await receiver.ReceiveAsync(buffer, RelayRoom, ushort.MaxValue).ConfigureAwait(false);
+                    }
+                    catch (SocketException)
+                    {
                         continue;
-                    channel = allocation.ChannelOf(peer);
-                    if (channel != null && channel.Expires < DateTime.UtcNow)
-                        channel = null;
-                }
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        return;
+                    }
 
-                int count = result.ReceivedBytes;
-                byte[] message;
-                if (channel != null)
-                {
-                    message = TurnChannelData.Create(channel.Number, buffer, 0, count, allocation.Connection.IsStream);
+                    var peer = receiver.RemoteEndPoint;
+                    // of more than a Data indication's 16 bit length takes, framed: dropped, as no client could read it
+                    if (TurnIndication.Size(peer, count, false) - StunMessage.HeaderLength > ushort.MaxValue)
+                        continue;
+                    Channel channel;
+                    lock (_sync)
+                    {
+                        if (allocation.Closed || !allocation.Permissions.TryGetValue(peer.Address, out DateTime until) || until < DateTime.UtcNow)
+                            continue;
+                        channel = allocation.ChannelOf(peer);
+                        if (channel != null && channel.Expires < DateTime.UtcNow)
+                            channel = null;
+                    }
+
+                    int start, length;
+                    if (channel != null)
+                    {
+                        start = RelayRoom - StunFraming.ChannelDataHeaderLength;
+                        length = TurnChannelData.Frame(buffer.AsSpan(start), channel.Number, count, allocation.Connection.IsStream);
+                    }
+                    else
+                    {
+                        start = RelayRoom - TurnIndication.HeaderSize(peer);
+                        length = TurnIndication.Frame(buffer.AsSpan(start), TurnMethod.Data, peer, count);
+                    }
+                    allocation.Connection.Send(buffer, start, length);
                 }
-                else
-                {
-                    byte[] data = new byte[count];
-                    Buffer.BlockCopy(buffer, 0, data, 0, count);
-                    message = new StunMessage(TurnMethod.Data, StunMessageClass.Indication)
-                        .AddXorAddress(peer, TurnAttributeType.XorPeerAddress)
-                        .AddAttribute(TurnAttributeType.Data, data)
-                        .ToBytes(null, false);
-                }
-                allocation.Connection.Send(message);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
+
+        // the header of a Data indication of a peer of IPv6: of a message's, an XOR-PEER-ADDRESS's, and DATA's own
+        private static readonly int RelayRoom = TurnIndication.HeaderSize(new IPEndPoint(IPAddress.IPv6Any, 0));
 
         // a Send indication: to a peer of a permission, of the DF bit of a DONT-FRAGMENT (RFC 8656 11.2)
         private void OnIndication(StunMessage indication, StunServerConnection connection)
@@ -646,9 +675,12 @@ namespace SharpTurnServer
             {
                 lock (relay)
                 {
-                    if (relay.Family == AddressFamily.InterNetwork)
+                    if (relay.Family == AddressFamily.InterNetwork && relay.DontFragment != dontFragment)
+                    {
                         relay.Socket.DontFragment = dontFragment;
-                    relay.Socket.SendTo(buffer, offset, count, SocketFlags.None, peer);
+                        relay.DontFragment = dontFragment;
+                    }
+                    relay.Sender.SendTo(buffer, offset, count, peer);
                 }
             }
             catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)

@@ -23,6 +23,7 @@ using SharpStunClient;
 using SharpStunCommon;
 using SharpTurnClient;
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -49,22 +50,29 @@ namespace SharpICE
 
     /// <summary>
     /// A datagram that is not STUN - DTLS, RTP, RTCP (RFC 7983) - received on one of the agent's sockets, of a peer it knows.
-    /// Its buffer is the agent's own again once the event returns: what is kept of it is to be copied.
+    /// Its buffer, and these arguments, are the agent's own again once the event returns: what is kept of them is to be copied.
     /// </summary>
     public sealed class IceDataReceivedEventArgs : EventArgs
     {
-        public IceDataReceivedEventArgs(byte[] buffer, int offset, int count, IPEndPoint remoteEndPoint)
+        public IceDataReceivedEventArgs(byte[] buffer, int offset, int count, IPEndPoint remoteEndPoint) => Set(buffer, offset, count, remoteEndPoint);
+
+        internal IceDataReceivedEventArgs()
+        {
+        }
+
+        public byte[] Buffer { get; private set; }
+        public int Offset { get; private set; }
+        public int Count { get; private set; }
+        public IPEndPoint RemoteEndPoint { get; private set; }
+
+        internal IceDataReceivedEventArgs Set(byte[] buffer, int offset, int count, IPEndPoint remoteEndPoint)
         {
             Buffer = buffer;
             Offset = offset;
             Count = count;
             RemoteEndPoint = remoteEndPoint;
+            return this;
         }
-
-        public byte[] Buffer { get; }
-        public int Offset { get; }
-        public int Count { get; }
-        public IPEndPoint RemoteEndPoint { get; }
     }
 
     /// <summary>
@@ -103,8 +111,12 @@ namespace SharpICE
             // of UDP, the socket; of a passive candidate of TCP, the listener; of an active one, neither; of a relayed one, its
             // allocation's client
             public Socket Socket;
+            public UdpSender Sender;
             public TcpListener Listener;
             public TurnClient Turn;
+
+            // of its one receiving loop - the socket's, or the relay's client's - told of again of each datagram
+            public readonly IceDataReceivedEventArgs Args = new IceDataReceivedEventArgs();
 
             // the socket's or the listener's; of an active candidate of TCP, its address and port 9
             public IPEndPoint EndPoint;
@@ -138,13 +150,13 @@ namespace SharpICE
         private readonly List<IceCandidate> _remoteCandidates = new List<IceCandidate>();
         private readonly List<IceCandidatePair> _pairs = new List<IceCandidatePair>();
         private readonly LinkedList<IceCandidatePair> _triggered = new LinkedList<IceCandidatePair>();
-        private readonly Dictionary<string, IceCandidatePair> _transactions = new Dictionary<string, IceCandidatePair>();
+        private readonly Dictionary<StunTransactionKey, IceCandidatePair> _transactions = new Dictionary<StunTransactionKey, IceCandidatePair>();
         private readonly List<IceTcpConnection> _connections = new List<IceTcpConnection>();
         private readonly List<TurnClient> _turns = new List<TurnClient>();
         private readonly Random _random = new Random();
 
         // the requests of gathering, each the base it was sent from and what is waiting for its answer
-        private readonly Dictionary<string, TaskCompletionSource<IPEndPoint>> _gatherings = new Dictionary<string, TaskCompletionSource<IPEndPoint>>();
+        private readonly Dictionary<StunTransactionKey, TaskCompletionSource<IPEndPoint>> _gatherings = new Dictionary<StunTransactionKey, TaskCompletionSource<IPEndPoint>>();
 
         private Timer _timer;
         private int _ticking;
@@ -455,7 +467,7 @@ namespace SharpICE
                         Port = endPoint.Port,
                         Type = IceCandidateType.Host,
                     };
-                    var local = new LocalBase { Socket = socket, EndPoint = endPoint, Candidate = candidate, Buffer = new byte[MaxDatagram] };
+                    var local = new LocalBase { Socket = socket, Sender = new UdpSender(socket), EndPoint = endPoint, Candidate = candidate, Buffer = new byte[MaxDatagram] };
                     AddBase(local, gathered);
                     StartReceiving(local);
                 }
@@ -572,7 +584,7 @@ namespace SharpICE
                     {
                         try
                         {
-                            OnDatagram(local, null, e.Data, 0, e.Data.Length, e.Peer);
+                            OnDatagram(local, null, e.Buffer, e.Offset, e.Count, e.Peer);
                         }
                         catch (Exception ex)
                         {
@@ -600,7 +612,8 @@ namespace SharpICE
                         CertificateValidation = _options.TurnCertificateValidation,
                         InitialRetransmissionTimeout = _options.InitialRetransmissionTimeout,
                     };
-                    turn = await TurnClient.ConnectAsync(server.Uri, options, timeout.Token).ConfigureAwait(false);
+                    turn = new TurnClient(options);
+                    await turn.ConnectAsync(server.Uri, timeout.Token).ConfigureAwait(false);
                     // of IPv6, a relayed address of each family, of a server that allocates them (RFC 8656 7.1); one of RFC 5766
                     // takes the attribute for one it does not know, and allocates one of IPv4
                     await turn.AllocateAsync(new TurnAllocateOptions { Dual = _options.IncludeIPv6 }, timeout.Token).ConfigureAwait(false);
@@ -634,7 +647,7 @@ namespace SharpICE
             var request = StunClient.CreateBindingRequest(_options.Software);
             byte[] bytes = request.ToBytes();
             var answered = new TaskCompletionSource<IPEndPoint>(TaskCreationOptions.RunContinuationsAsynchronously);
-            string key = Key(request.TransactionId);
+            var key = Key(request.TransactionId);
             lock (_sync)
                 _gatherings[key] = answered;
 
@@ -1127,7 +1140,7 @@ namespace SharpICE
             return pair.Request;
         }
 
-        private static string Key(byte[] transactionId) => Convert.ToBase64String(transactionId);
+        private static StunTransactionKey Key(byte[] transactionId) => new StunTransactionKey(transactionId);
 
         #endregion // Checks
 
@@ -1137,13 +1150,13 @@ namespace SharpICE
         {
             Task.Run(async () =>
             {
-                var any = new IPEndPoint(local.EndPoint.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+                var receiver = new UdpReceiver(local.Socket);
                 while (!_closed)
                 {
-                    SocketReceiveFromResult result;
+                    int count;
                     try
                     {
-                        result = await local.Socket.ReceiveFromAsync(new ArraySegment<byte>(local.Buffer), SocketFlags.None, any).ConfigureAwait(false);
+                        count = await receiver.ReceiveAsync(local.Buffer, 0, local.Buffer.Length).ConfigureAwait(false);
                     }
                     catch (ObjectDisposedException)
                     {
@@ -1160,11 +1173,11 @@ namespace SharpICE
 
                     try
                     {
-                        OnDatagram(local, null, local.Buffer, 0, result.ReceivedBytes, (IPEndPoint)result.RemoteEndPoint);
+                        OnDatagram(local, null, local.Buffer, 0, count, receiver.RemoteEndPoint);
                     }
                     catch (Exception ex)
                     {
-                        Trace($"Datagram from {result.RemoteEndPoint} failed: {ex}");
+                        Trace($"Datagram from {receiver.RemoteEndPoint} failed: {ex}");
                     }
                 }
             });
@@ -1188,17 +1201,35 @@ namespace SharpICE
             }
 
             // DTLS, RTP, RTCP: of a peer whose candidate is known, or whose checks were; or of the pair a restart left selected
-            bool known;
+            if (IsKnown(local, connection, from))
+                DataReceived?.Invoke(this, (connection?.Args ?? local.Args).Set(buffer, offset, count, from));
+        }
+
+        private bool IsKnown(LocalBase local, IceTcpConnection connection, IPEndPoint from)
+        {
             lock (_sync)
             {
                 var selected = SelectedPair;
-                known = connection != null
-                    ? selected?.Connection == connection || _pairs.Any(p => p.Connection == connection)
-                    : selected != null && selected.Connection == null && selected.Base == local && selected.RemoteEndPoint.Equals(from)
-                        || _pairs.Any(p => p.Base == local && p.Connection == null && p.RemoteEndPoint.Equals(from));
+                if (connection != null)
+                {
+                    if (selected?.Connection == connection)
+                        return true;
+                    foreach (var pair in _pairs)
+                    {
+                        if (pair.Connection == connection)
+                            return true;
+                    }
+                    return false;
+                }
+                if (selected != null && selected.Connection == null && selected.Base == local && selected.RemoteEndPoint.Equals(from))
+                    return true;
+                foreach (var pair in _pairs)
+                {
+                    if (pair.Base == local && pair.Connection == null && pair.RemoteEndPoint.Equals(from))
+                        return true;
+                }
+                return false;
             }
-            if (known)
-                DataReceived?.Invoke(this, new IceDataReceivedEventArgs(buffer, offset, count, from));
         }
 
         // an IPv4 address mapped to IPv6, of a dual socket, as the IPv4 address it is
@@ -1363,7 +1394,7 @@ namespace SharpICE
 
         private void OnResponse(LocalBase local, IceTcpConnection connection, StunMessage response, IPEndPoint from)
         {
-            string key = Key(response.TransactionId);
+            var key = Key(response.TransactionId);
             TaskCompletionSource<IPEndPoint> gathering;
             lock (_sync)
                 _gatherings.TryGetValue(key, out gathering);
@@ -1493,7 +1524,7 @@ namespace SharpICE
                 return;
             try
             {
-                outgoing.Base.Socket.SendTo(outgoing.Bytes, 0, outgoing.Bytes.Length, SocketFlags.None, outgoing.To);
+                outgoing.Base.Sender.SendTo(outgoing.Bytes, 0, outgoing.Bytes.Length, outgoing.To);
             }
             catch (ObjectDisposedException)
             {
@@ -1514,15 +1545,27 @@ namespace SharpICE
                 return pair.Connection?.Send(buffer, offset, count) == true;
             if (pair.Base.Turn != null)
             {
-                // the relay's: the buffer the caller's again at once, a copy of it sent
-                byte[] copy = new byte[count];
+                var turn = pair.Base.Turn;
+                try
+                {
+                    // of a channel bound, at once; else - a permission to install first - of a copy of a pool, the buffer the
+                    // caller's again at once
+                    if (turn.TrySend(pair.RemoteEndPoint, buffer, offset, count))
+                        return turn.IsAllocated;
+                }
+                catch (Exception ex) when (ex is ObjectDisposedException || ex is SocketException || ex is System.IO.IOException || ex is InvalidOperationException)
+                {
+                    Trace($"Relayed send to {pair.RemoteEndPoint} failed: {ex.Message}");
+                    return false;
+                }
+                byte[] copy = ArrayPool<byte>.Shared.Rent(count);
                 Buffer.BlockCopy(buffer, offset, copy, 0, count);
-                _ = SendRelayedAsync(pair.Base.Turn, pair.RemoteEndPoint, copy, 0, count);
-                return pair.Base.Turn.IsAllocated;
+                _ = SendRelayedAsync(turn, pair.RemoteEndPoint, copy, 0, count, true);
+                return turn.IsAllocated;
             }
             try
             {
-                pair.Base.Socket.SendTo(buffer, offset, count, SocketFlags.None, pair.RemoteEndPoint);
+                pair.Base.Sender.SendTo(buffer, offset, count, pair.RemoteEndPoint);
                 return true;
             }
             catch (ObjectDisposedException)
@@ -1536,8 +1579,8 @@ namespace SharpICE
             }
         }
 
-        // through the relay: of a permission of the peer's address installed first, of none yet
-        private async Task SendRelayedAsync(TurnClient turn, IPEndPoint to, byte[] buffer, int offset, int count)
+        // through the relay: of a permission of the peer's address installed first, of none yet; a buffer of the pool's, back to it
+        private async Task SendRelayedAsync(TurnClient turn, IPEndPoint to, byte[] buffer, int offset, int count, bool pooled = false)
         {
             try
             {
@@ -1546,6 +1589,11 @@ namespace SharpICE
             catch (Exception ex) when (ex is TurnException || ex is StunException || ex is ObjectDisposedException || ex is SocketException || ex is System.IO.IOException)
             {
                 Trace($"Relayed send to {to} failed: {ex.Message}");
+            }
+            finally
+            {
+                if (pooled)
+                    ArrayPool<byte>.Shared.Return(buffer);
             }
         }
 

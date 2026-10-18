@@ -467,7 +467,8 @@ namespace SharpICE.Tests
             var all = await StunClient.ResolveAllAsync(StunUri.Parse("stun:localhost:" + server.EndPoint.Port), TimeSpan.FromSeconds(1));
             CollectionAssert.Contains(all, server.EndPoint);
 
-            using var client = await StunClient.ConnectAsync("stun:localhost:" + server.EndPoint.Port, FastOptions());
+            using var client = new StunClient(FastOptions());
+            await client.ConnectAsync("stun:localhost:" + server.EndPoint.Port);
             Assert.IsInstanceOfType<StunUdpTransport>(client.Transport, "a stun URI is of UDP");
 
             Assert.IsNotNull(await client.GetMappedAddressAsync());
@@ -510,7 +511,8 @@ namespace SharpICE.Tests
             var logic = new LongTermServer(null);
             using var server = new FakeServer(logic.Handle, certificate: certificate);
 
-            using var client = await StunClient.ConnectAsync("stuns:localhost:" + server.EndPoint.Port, FastOptions());
+            using var client = new StunClient(FastOptions());
+            await client.ConnectAsync("stuns:localhost:" + server.EndPoint.Port);
 
             Assert.IsInstanceOfType<StunStreamTransport>(client.Transport);
             Assert.IsTrue(((StunStreamTransport)client.Transport).IsSecure);
@@ -526,8 +528,8 @@ namespace SharpICE.Tests
             var options = FastOptions();
             options.CertificateValidation = null;
 
-            await Assert.ThrowsExactlyAsync<StunException>(() => StunClient.ConnectAsync("stuns:localhost:" + server.EndPoint.Port, options));
-            await Assert.ThrowsExactlyAsync<StunException>(() => StunClient.ConnectAsync("stuns:127.0.0.1:" + server.EndPoint.Port, options), "of an IP address");
+            await Assert.ThrowsExactlyAsync<StunException>(() => new StunClient(options).ConnectAsync("stuns:localhost:" + server.EndPoint.Port));
+            await Assert.ThrowsExactlyAsync<StunException>(() => new StunClient(options).ConnectAsync("stuns:127.0.0.1:" + server.EndPoint.Port), "of an IP address");
         }
 
         [TestMethod]

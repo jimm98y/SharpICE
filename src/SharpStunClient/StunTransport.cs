@@ -19,8 +19,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#if NET8_0_OR_GREATER
+using ReadTask = System.Threading.Tasks.ValueTask<bool>;
+#else
+using ReadTask = System.Threading.Tasks.Task<bool>;
+#endif
 using SharpStunCommon;
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.IO;
 using System.Net;
@@ -31,35 +37,52 @@ using System.Threading.Tasks;
 
 namespace SharpStunClient
 {
-    /// <summary>A STUN message received, and where from.</summary>
+    /// <summary>
+    /// A STUN message received, and where from. The arguments are the transport's own again once the event returns, told of
+    /// the next message: what is kept of them is to be copied.
+    /// </summary>
     public sealed class StunMessageEventArgs : EventArgs
     {
-        public StunMessageEventArgs(StunMessage message, IPEndPoint remoteEndPoint)
+        public StunMessageEventArgs(StunMessage message, IPEndPoint remoteEndPoint) => Set(message, remoteEndPoint);
+
+        internal StunMessageEventArgs()
+        {
+        }
+
+        public StunMessage Message { get; private set; }
+        public IPEndPoint RemoteEndPoint { get; private set; }
+
+        internal StunMessageEventArgs Set(StunMessage message, IPEndPoint remoteEndPoint)
         {
             Message = message;
             RemoteEndPoint = remoteEndPoint;
+            return this;
         }
-
-        public StunMessage Message { get; }
-        public IPEndPoint RemoteEndPoint { get; }
     }
 
     /// <summary>
     /// What the server sent that is not STUN: of TURN, a ChannelData message (RFC 8656 12.4), its padding over TCP left out. Its
-    /// buffer is its own.
+    /// buffer, and these arguments, are the transport's own again once the event returns: what is kept of them is to be copied.
     /// </summary>
     public sealed class StunDataEventArgs : EventArgs
     {
-        public StunDataEventArgs(byte[] buffer, int offset, int count)
+        public StunDataEventArgs(byte[] buffer, int offset, int count) => Set(buffer, offset, count);
+
+        internal StunDataEventArgs()
+        {
+        }
+
+        public byte[] Buffer { get; private set; }
+        public int Offset { get; private set; }
+        public int Count { get; private set; }
+
+        internal StunDataEventArgs Set(byte[] buffer, int offset, int count)
         {
             Buffer = buffer;
             Offset = offset;
             Count = count;
+            return this;
         }
-
-        public byte[] Buffer { get; }
-        public int Offset { get; }
-        public int Count { get; }
     }
 
     /// <summary>
@@ -82,6 +105,9 @@ namespace SharpStunClient
 
         public abstract Task SendAsync(byte[] message, CancellationToken cancellationToken = default);
 
+        /// <summary>Bytes of a buffer the caller's again once the task completes: of TURN, ChannelData of a buffer of a pool.</summary>
+        public abstract Task SendAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default);
+
         public event EventHandler<StunMessageEventArgs> MessageReceived;
 
         /// <summary>What the server sent that is not STUN: ChannelData (RFC 8656 12.4), of its first byte of 0x40 to 0x4F.</summary>
@@ -90,16 +116,16 @@ namespace SharpStunClient
         /// <summary>The connection of a reliable transport ended: of the error, or of null, closed by the server.</summary>
         public event EventHandler<Exception> Closed;
 
-        protected void OnMessageReceived(StunMessage message, IPEndPoint from) => MessageReceived?.Invoke(this, new StunMessageEventArgs(message, from));
+        // of each transport, its one receiving loop's: told of again of each message
+        private readonly StunMessageEventArgs _messageArgs = new StunMessageEventArgs();
+        private readonly StunDataEventArgs _dataArgs = new StunDataEventArgs();
+
+        protected void OnMessageReceived(StunMessage message, IPEndPoint from) => MessageReceived?.Invoke(this, _messageArgs.Set(message, from));
 
         protected void OnClosed(Exception error) => Closed?.Invoke(this, error);
 
-        protected void OnDataReceived(byte[] buffer, int offset, int count)
-        {
-            byte[] copy = new byte[count];
-            Buffer.BlockCopy(buffer, offset, copy, 0, count);
-            DataReceived?.Invoke(this, new StunDataEventArgs(copy, 0, count));
-        }
+        /// <summary>ChannelData, of the buffer it was read into: the transport's own again once the event returns.</summary>
+        protected void OnDataReceived(byte[] buffer, int offset, int count) => DataReceived?.Invoke(this, _dataArgs.Set(buffer, offset, count));
 
         /// <summary>
         /// A transport of the same protocol to another server, of an ALTERNATE-SERVER (RFC 8489 10): of TLS, its certificate of
@@ -118,6 +144,7 @@ namespace SharpStunClient
     {
         private readonly bool _ownsSocket;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+        private readonly UdpSender _sender;
 
         /// <summary>Of a socket of its own, bound to any address, which it reads.</summary>
         public StunUdpTransport(IPEndPoint server)
@@ -125,6 +152,7 @@ namespace SharpStunClient
             RemoteEndPoint = server ?? throw new ArgumentNullException(nameof(server));
             Socket = new Socket(server.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
             Socket.Bind(new IPEndPoint(server.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0));
+            _sender = new UdpSender(Socket);
             _ownsSocket = true;
             _ = ReceiveLoopAsync();
         }
@@ -134,6 +162,7 @@ namespace SharpStunClient
         {
             Socket = socket ?? throw new ArgumentNullException(nameof(socket));
             RemoteEndPoint = server ?? throw new ArgumentNullException(nameof(server));
+            _sender = new UdpSender(socket);
             if (receive)
                 _ = ReceiveLoopAsync();
         }
@@ -144,9 +173,11 @@ namespace SharpStunClient
 
         public override IPEndPoint LocalEndPoint => (IPEndPoint)Socket.LocalEndPoint;
 
-        public override Task SendAsync(byte[] message, CancellationToken cancellationToken = default)
+        public override Task SendAsync(byte[] message, CancellationToken cancellationToken = default) => SendAsync(message, 0, message.Length, cancellationToken);
+
+        public override Task SendAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
         {
-            Socket.SendTo(message, RemoteEndPoint);
+            _sender.SendTo(buffer, offset, count, RemoteEndPoint);
             return Task.CompletedTask;
         }
 
@@ -180,13 +211,13 @@ namespace SharpStunClient
         private async Task ReceiveLoopAsync()
         {
             byte[] buffer = new byte[1500];
-            var any = new IPEndPoint(Socket.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+            var receiver = new UdpReceiver(Socket);
             while (!_cts.IsCancellationRequested)
             {
-                SocketReceiveFromResult result;
+                int count;
                 try
                 {
-                    result = await Socket.ReceiveFromAsync(new ArraySegment<byte>(buffer), SocketFlags.None, any).ConfigureAwait(false);
+                    count = await receiver.ReceiveAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
                 }
                 catch (SocketException)
                 {
@@ -197,7 +228,7 @@ namespace SharpStunClient
                 {
                     return;
                 }
-                Receive(buffer, 0, result.ReceivedBytes, (IPEndPoint)result.RemoteEndPoint);
+                Receive(buffer, 0, count, receiver.RemoteEndPoint);
             }
         }
 
@@ -274,12 +305,18 @@ namespace SharpStunClient
 
         public override IPEndPoint LocalEndPoint => _localEndPoint;
 
-        public override async Task SendAsync(byte[] message, CancellationToken cancellationToken = default)
+        public override Task SendAsync(byte[] message, CancellationToken cancellationToken = default) => SendAsync(message, 0, message.Length, cancellationToken);
+
+        public override async Task SendAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
         {
             await _writing.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                await _stream.WriteAsync(message, 0, message.Length, cancellationToken).ConfigureAwait(false);
+#if NET8_0_OR_GREATER
+                await _stream.WriteAsync(buffer.AsMemory(offset, count), cancellationToken).ConfigureAwait(false);
+#else
+                await _stream.WriteAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+#endif
                 await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
             finally
@@ -293,37 +330,34 @@ namespace SharpStunClient
 
         private async Task ReceiveLoopAsync()
         {
-            byte[] header = new byte[StunMessage.HeaderLength];
+            // the connection's one buffer, of a pool, of the longest message there is: a STUN message's header and 65535 bytes
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(StunMessage.HeaderLength + ushort.MaxValue);
             Exception error = null;
             try
             {
                 while (!_cts.IsCancellationRequested)
                 {
-                    if (!await ReadExactlyAsync(header, 0, 4).ConfigureAwait(false))
+                    if (!await ReadExactlyAsync(buffer, 0, 4).ConfigureAwait(false))
                         break;
                     // ChannelData of TURN: its length, then its data, padded to 4 bytes over a stream (RFC 8656 12.5)
-                    if (StunFraming.IsChannelData(header[0]))
+                    if (StunFraming.IsChannelData(buffer[0]))
                     {
-                        int dataLength = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
-                        byte[] channelData = new byte[4 + ((dataLength + 3) & ~3)];
-                        Buffer.BlockCopy(header, 0, channelData, 0, 4);
-                        if (!await ReadExactlyAsync(channelData, 4, channelData.Length - 4).ConfigureAwait(false))
+                        int dataLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(2));
+                        if (!await ReadExactlyAsync(buffer, 4, (dataLength + 3) & ~3).ConfigureAwait(false))
                             break;
-                        OnDataReceived(channelData, 0, 4 + dataLength);
+                        OnDataReceived(buffer, 0, 4 + dataLength);
                         continue;
                     }
-                    if (!await ReadExactlyAsync(header, 4, header.Length - 4).ConfigureAwait(false))
+                    if (!await ReadExactlyAsync(buffer, 4, StunMessage.HeaderLength - 4).ConfigureAwait(false))
                         break;
                     // else STUN: each message's header says how long it is
-                    if ((header[0] & 0xC0) != 0 || BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(4)) != StunMessage.MagicCookie)
+                    if ((buffer[0] & 0xC0) != 0 || BinaryPrimitives.ReadUInt32BigEndian(buffer.AsSpan(4)) != StunMessage.MagicCookie)
                         throw new InvalidDataException("What the server sent is neither STUN nor ChannelData.");
-                    int length = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(2));
-                    byte[] message = new byte[StunMessage.HeaderLength + length];
-                    Buffer.BlockCopy(header, 0, message, 0, header.Length);
-                    if (!await ReadExactlyAsync(message, header.Length, length).ConfigureAwait(false))
+                    int length = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(2));
+                    if (!await ReadExactlyAsync(buffer, StunMessage.HeaderLength, length).ConfigureAwait(false))
                         break;
 
-                    var parsed = StunMessage.Parse(message, 0, message.Length);
+                    var parsed = StunMessage.Parse(buffer, 0, StunMessage.HeaderLength + length);
                     if (parsed == null)
                         throw new InvalidDataException("The server sent a STUN message that is not well formed.");
                     OnMessageReceived(parsed, RemoteEndPoint);
@@ -333,15 +367,27 @@ namespace SharpStunClient
             {
                 error = e;
             }
+            finally
+            {
+                // of what TLS decrypted: cleared, before the pool hands it to anything else
+                ArrayPool<byte>.Shared.Return(buffer, true);
+            }
             if (!_cts.IsCancellationRequested)
                 OnClosed(error);
         }
 
-        private async Task<bool> ReadExactlyAsync(byte[] buffer, int offset, int count)
+#if NET8_0_OR_GREATER
+        [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+#endif
+        private async ReadTask ReadExactlyAsync(byte[] buffer, int offset, int count)
         {
             while (count > 0)
             {
+#if NET8_0_OR_GREATER
+                int read = await _stream.ReadAsync(buffer.AsMemory(offset, count), _cts.Token).ConfigureAwait(false);
+#else
                 int read = await _stream.ReadAsync(buffer, offset, count, _cts.Token).ConfigureAwait(false);
+#endif
                 if (read == 0)
                     return false;
                 offset += read;

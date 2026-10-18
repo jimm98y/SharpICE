@@ -213,10 +213,31 @@ namespace SharpTurnCommon
         public static byte[] Create(ushort channel, byte[] buffer, int offset, int count, bool padded)
         {
             byte[] message = new byte[StunFraming.ChannelDataSize(count, padded)];
-            BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(0), channel);
-            BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(2), (ushort)count);
-            Buffer.BlockCopy(buffer, offset, message, StunFraming.ChannelDataHeaderLength, count);
+            Write(message, channel, new ReadOnlySpan<byte>(buffer, offset, count), padded);
             return message;
+        }
+
+        /// <summary>
+        /// A ChannelData message of the data into the destination, of <see cref="StunFraming.ChannelDataSize"/> bytes at least,
+        /// padded with zeros of a stream: the bytes written.
+        /// </summary>
+        public static int Write(Span<byte> destination, ushort channel, ReadOnlySpan<byte> data, bool padded)
+        {
+            data.CopyTo(destination.Slice(StunFraming.ChannelDataHeaderLength));
+            return Frame(destination, channel, data.Length, padded);
+        }
+
+        /// <summary>
+        /// The header of a ChannelData message whose data is in the destination already, past its 4 bytes, and the padding of a
+        /// stream after it: the bytes the message takes.
+        /// </summary>
+        public static int Frame(Span<byte> destination, ushort channel, int dataLength, bool padded)
+        {
+            BinaryPrimitives.WriteUInt16BigEndian(destination, channel);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(2), (ushort)dataLength);
+            int size = StunFraming.ChannelDataSize(dataLength, padded);
+            destination.Slice(StunFraming.ChannelDataHeaderLength + dataLength, size - StunFraming.ChannelDataHeaderLength - dataLength).Clear();
+            return size;
         }
 
         /// <summary>
@@ -234,6 +255,54 @@ namespace SharpTurnCommon
             dataLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(offset + 2));
             return channel >= TurnConstants.MinChannel && channel <= TurnConstants.MaxChannel
                 && StunFraming.ChannelDataHeaderLength + dataLength <= count;
+        }
+    }
+
+    /// <summary>
+    /// A Send or Data indication (RFC 8656 10.1, 11.4) written straight into a span: its header, XOR-PEER-ADDRESS and DATA - and
+    /// of a Send indication of the DF bit, DONT-FRAGMENT - of no FINGERPRINT, as no indication of TURN needs one.
+    /// </summary>
+    public static class TurnIndication
+    {
+        private const int DataAttributeHeaderLength = 4;
+
+        /// <summary>The bytes of an indication before its data: its header, XOR-PEER-ADDRESS, and DATA's own header.</summary>
+        public static int HeaderSize(IPEndPoint peer) => StunMessage.HeaderLength + StunWriter.XorAddressSize(peer) + DataAttributeHeaderLength;
+
+        /// <summary>The bytes of an indication of the data in all.</summary>
+        public static int Size(IPEndPoint peer, int dataLength, bool dontFragment)
+            => HeaderSize(peer) + dataLength + StunWriter.Padding(dataLength) + (dontFragment ? 4 : 0);
+
+        /// <summary>An indication of the data into the destination, of <see cref="Size"/> bytes at least: the bytes written.</summary>
+        public static int Write(Span<byte> destination, ushort method, IPEndPoint peer, ReadOnlySpan<byte> data, bool dontFragment = false)
+        {
+            data.CopyTo(destination.Slice(HeaderSize(peer)));
+            return Frame(destination, method, peer, data.Length, dontFragment);
+        }
+
+        /// <summary>
+        /// The header of an indication whose data is in the destination already, past <see cref="HeaderSize"/> bytes, and its
+        /// padding and DONT-FRAGMENT after it: the bytes the indication takes.
+        /// </summary>
+        public static int Frame(Span<byte> destination, ushort method, IPEndPoint peer, int dataLength, bool dontFragment = false)
+        {
+            int size = Size(peer, dataLength, dontFragment);
+            Span<byte> transactionId = stackalloc byte[StunMessage.TransactionIdLength];
+            StunWriter.NewTransactionId(transactionId);
+            StunWriter.WriteHeader(destination, method, StunMessageClass.Indication, size - StunMessage.HeaderLength, transactionId);
+            int position = StunMessage.HeaderLength;
+            position += StunWriter.WriteXorAddress(destination.Slice(position), TurnAttributeType.XorPeerAddress, peer, transactionId);
+            StunWriter.WriteAttributeHeader(destination.Slice(position), TurnAttributeType.Data, dataLength);
+            position += DataAttributeHeaderLength + dataLength;
+            int padding = StunWriter.Padding(dataLength);
+            destination.Slice(position, padding).Clear();
+            position += padding;
+            if (dontFragment)
+            {
+                StunWriter.WriteAttributeHeader(destination.Slice(position), TurnAttributeType.DontFragment, 0);
+                position += 4;
+            }
+            return position;
         }
     }
 }

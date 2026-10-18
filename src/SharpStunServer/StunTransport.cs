@@ -22,6 +22,7 @@
 using Org.BouncyCastle.Tls;
 using SharpStunCommon;
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
@@ -30,77 +31,75 @@ using System.Net.Sockets;
 namespace SharpStunServer
 {
     /// <summary>
-    /// The datagrams of one peer of a socket a server shares among its peers: those the server's reader hands it, queued, and
-    /// its own sent to the peer.
+    /// The datagrams of one peer of a socket a server shares among its peers: those the server's reader hands it, queued - each
+    /// in a buffer of a pool, its own again once read - and its own sent to the peer.
     /// </summary>
     internal sealed class QueuedDatagramTransport : DatagramTransport, DatagramSender
     {
-        private readonly Socket _socket;
-        private readonly EndPoint _remote;
-        private readonly BlockingCollection<byte[]> _received = new BlockingCollection<byte[]>(64);
+        private readonly UdpSender _sender;
+        private readonly IPEndPoint _remote;
+        private readonly BlockingCollection<ArraySegment<byte>> _received = new BlockingCollection<ArraySegment<byte>>(64);
 
-        public QueuedDatagramTransport(Socket socket, EndPoint remote)
+        public QueuedDatagramTransport(UdpSender sender, IPEndPoint remote)
         {
-            _socket = socket;
+            _sender = sender;
             _remote = remote;
         }
 
-        public IPEndPoint LocalEndPoint => (IPEndPoint)_socket.LocalEndPoint;
+        public IPEndPoint LocalEndPoint => (IPEndPoint)_sender.Socket.LocalEndPoint;
 
         public DateTime LastReceived { get; private set; } = DateTime.UtcNow;
 
-        /// <summary>A datagram of the peer's; false of one dropped, of a queue full.</summary>
-        public bool Enqueue(byte[] datagram)
+        /// <summary>A datagram of the peer's, copied; false of one dropped, of a queue full.</summary>
+        public bool Enqueue(byte[] buffer, int offset, int count)
         {
             LastReceived = DateTime.UtcNow;
+            byte[] datagram = ArrayPool<byte>.Shared.Rent(count);
+            Buffer.BlockCopy(buffer, offset, datagram, 0, count);
             try
             {
-                return _received.TryAdd(datagram);
+                if (_received.TryAdd(new ArraySegment<byte>(datagram, 0, count)))
+                    return true;
             }
             catch (InvalidOperationException)
             {
-                return false;
             }
+            ArrayPool<byte>.Shared.Return(datagram);
+            return false;
         }
 
         public int GetReceiveLimit() => ushort.MaxValue;
 
         public int GetSendLimit() => DtlsDefaults.Mtu - 28;
 
-        public int Receive(byte[] buf, int off, int len, int waitMillis)
+        public int Receive(byte[] buf, int off, int len, int waitMillis) => Receive(new Span<byte>(buf, off, len), waitMillis);
+
+#if NETCOREAPP
+        public int Receive(Span<byte> buffer, int waitMillis)
+#else
+        private int Receive(Span<byte> buffer, int waitMillis)
+#endif
         {
+            ArraySegment<byte> datagram;
             try
             {
-                if (!_received.TryTake(out byte[] datagram, waitMillis))
+                if (!_received.TryTake(out datagram, waitMillis))
                     return -1;
-                int count = Math.Min(len, datagram.Length);
-                Buffer.BlockCopy(datagram, 0, buf, off, count);
-                return count;
             }
             catch (Exception ex) when (ex is ObjectDisposedException || ex is InvalidOperationException)
             {
                 throw new IOException("The peer's datagrams ended.", ex);
             }
-        }
-
-        public void Send(byte[] buf, int off, int len)
-        {
-            byte[] datagram = new byte[len];
-            Buffer.BlockCopy(buf, off, datagram, 0, len);
-            _socket.SendTo(datagram, _remote);
-        }
-
-#if NETCOREAPP
-        public int Receive(Span<byte> buffer, int waitMillis)
-        {
-            byte[] array = new byte[buffer.Length];
-            int count = Receive(array, 0, array.Length, waitMillis);
-            if (count > 0)
-                array.AsSpan(0, count).CopyTo(buffer);
+            int count = Math.Min(buffer.Length, datagram.Count);
+            datagram.AsSpan(0, count).CopyTo(buffer);
+            ArrayPool<byte>.Shared.Return(datagram.Array);
             return count;
         }
 
-        public void Send(ReadOnlySpan<byte> buffer) => Send(buffer.ToArray(), 0, buffer.Length);
+        public void Send(byte[] buf, int off, int len) => _sender.SendTo(buf, off, len, _remote);
+
+#if NET8_0_OR_GREATER
+        public void Send(ReadOnlySpan<byte> buffer) => _sender.SendTo(buffer, _remote);
 #endif
 
         public void Close() => _received.CompleteAdding();
