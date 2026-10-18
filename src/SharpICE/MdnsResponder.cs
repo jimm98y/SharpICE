@@ -26,6 +26,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -179,8 +180,14 @@ namespace SharpICE
             // a query (QR 0, opcode 0) of questions alone
             if (count < 12 || (query[2] & 0xF8) != 0)
                 return;
+            // of the link alone (RFC 6762 5.5, 11): a query of another network is not one of mDNS, and the addresses the names
+            // hide are not for it
+            if (!IsOnLink(from.Address))
+                return;
             int questions = BinaryPrimitives.ReadUInt16BigEndian(query.AsSpan(4));
             int position = 12;
+            // each name answered once, however many times the query asks of it
+            var answered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < questions; i++)
             {
                 int start = position;
@@ -200,6 +207,8 @@ namespace SharpICE
                 ushort wanted = address.AddressFamily == AddressFamily.InterNetwork ? DnsMessage.TypeA : DnsMessage.TypeAaaa;
                 if (type != wanted && type != 255 || (questionClass & 0x7FFF) != DnsMessage.ClassIn && (questionClass & 0x7FFF) != 255)
                     continue;
+                if (!answered.Add(name))
+                    continue;
 
                 bool legacy = from.Port != MdnsResolver.Port;
                 bool unicast = legacy || (questionClass & DnsMessage.UnicastResponse) != 0 || !_multicast;
@@ -211,6 +220,68 @@ namespace SharpICE
                 socket.SendTo(response, to);
                 _trace?.Invoke($"mDNS: {name} is {address}, told {(unicast ? from.ToString() : "the group")}");
             }
+        }
+
+        // the networks of this host's interfaces, of their prefixes: what a source of the link is of
+        private static readonly Lazy<List<(byte[] Network, int Prefix)>> Links = new Lazy<List<(byte[], int)>>(() =>
+        {
+            var links = new List<(byte[], int)>();
+            try
+            {
+                foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
+                    {
+                        int prefix;
+                        try
+                        {
+                            prefix = unicast.PrefixLength;
+                        }
+                        catch (PlatformNotSupportedException)
+                        {
+                            continue;
+                        }
+                        links.Add((unicast.Address.GetAddressBytes(), prefix));
+                    }
+                }
+            }
+            catch (NetworkInformationException)
+            {
+            }
+            return links;
+        });
+
+        // whether the source is on a link of this host: of IPv6 link-local, or of a network of one of its interfaces
+        internal static bool IsOnLink(IPAddress source)
+        {
+            if (source.IsIPv4MappedToIPv6)
+                source = source.MapToIPv4();
+            if (source.IsIPv6LinkLocal || IPAddress.IsLoopback(source))
+                return true;
+            byte[] bytes = source.GetAddressBytes();
+            if (bytes.Length == 4 && bytes[0] == 169 && bytes[1] == 254)
+                return true;
+            foreach (var (network, prefix) in Links.Value)
+            {
+                if (network.Length == bytes.Length && prefix > 0 && SamePrefix(network, bytes, prefix))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool SamePrefix(byte[] a, byte[] b, int bits)
+        {
+            int whole = bits / 8;
+            for (int i = 0; i < whole; i++)
+            {
+                if (a[i] != b[i])
+                    return false;
+            }
+            int rest = bits % 8;
+            if (rest == 0)
+                return true;
+            int mask = 0xFF << (8 - rest) & 0xFF;
+            return (a[whole] & mask) == (b[whole] & mask);
         }
 
         // an authoritative answer of one record, its cache-flush bit set as of a name of its own (RFC 6762 10.2); of legacy

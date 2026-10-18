@@ -189,6 +189,10 @@ namespace SharpStunClient
             var message = StunMessage.Parse(buffer, offset, count);
             if (message != null)
             {
+                // an indication - of TURN, a Data indication - of the server alone: of anyone else, one forged to the client's
+                // socket (RFC 8656 11.4), as ChannelData is of the server alone below
+                if (message.Class == StunMessageClass.Indication && !from.Equals(RemoteEndPoint))
+                    return false;
                 OnMessageReceived(message, from);
                 return true;
             }

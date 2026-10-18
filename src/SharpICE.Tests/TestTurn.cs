@@ -36,6 +36,8 @@ namespace SharpICE.Tests
                 AuthenticateBinding = false,
             },
             RelayAddress = IPAddress.Loopback,
+            // the peers of the tests are of the loopback
+            AllowPeer = peer => true,
         };
 
         private static StunClientOptions ClientOptions(string user = "user") => new StunClientOptions

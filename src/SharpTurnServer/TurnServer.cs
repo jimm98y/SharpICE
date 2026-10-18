@@ -71,15 +71,28 @@ namespace SharpTurnServer
         public TimeSpan DefaultLifetime { get; set; } = TurnConstants.DefaultLifetime;
         public TimeSpan MaxLifetime { get; set; } = TurnConstants.MaxLifetime;
 
-        /// <summary>How many allocations a user may have at once; more are answered 486.</summary>
+        /// <summary>How many allocations a user may have at once - its EVEN-PORT reservations of them; more are answered 486.</summary>
         public int MaxAllocationsPerUser { get; set; } = 10;
 
+        /// <summary>How many allocations - and reservations - the server has at most, of all its users; more are answered 508.</summary>
+        public int MaxAllocations { get; set; } = 1000;
+
+        /// <summary>How many peers' addresses an allocation may have permissions of at once; more are answered 508.</summary>
+        public int MaxPermissionsPerAllocation { get; set; } = 128;
+
         /// <summary>
-        /// Whether data may be relayed to and of a peer: of none given, of any; of one refused, its permission or channel is
-        /// answered 403 and a Send indication to it dropped (RFC 8656 10.2, 11.2, 12.2) - of a server that is not to reach its
-        /// own network, of its private addresses.
+        /// Whether data may be relayed to and of a peer: of one refused, its permission or channel is answered 403 and a Send
+        /// indication to it dropped (RFC 8656 10.2, 11.2, 12.2). Of its default, <see cref="TurnPeers.IsPublic(IPEndPoint)"/>:
+        /// public unicast addresses alone, as a server is not to reach its own network; of a server for a private network,
+        /// one of the peers it is to reach. Of any, the server's own listeners and relays are refused, of a loop.
         /// </summary>
-        public Func<IPEndPoint, bool> AllowPeer { get; set; }
+        public Func<IPEndPoint, bool> AllowPeer { get; set; } = TurnPeers.IsPublic;
+
+        /// <summary>
+        /// Whether to relay of no credentials, of a <see cref="StunServerOptions.Realm"/> of none: an open relay, of anyone's -
+        /// of a spoofed source over UDP too - which RFC 8656 5 forbids. Of false, the default, a server of no realm is refused.
+        /// </summary>
+        public bool AllowUnauthenticated { get; set; }
 
         /// <summary>What it does, a line at a time, of anything given.</summary>
         public Action<string> Trace { get; set; }
@@ -167,6 +180,7 @@ namespace SharpTurnServer
         {
             public Socket Socket;
             public DateTime Expires;
+            public string Username;
         }
 
         private readonly TurnServerOptions _options;
@@ -180,6 +194,8 @@ namespace SharpTurnServer
         public TurnServer(TurnServerOptions options = null)
         {
             _options = options ?? new TurnServerOptions();
+            if (_options.Stun.Realm == null && !_options.AllowUnauthenticated)
+                throw new ArgumentException("A TURN server takes long-term credentials (RFC 8656 5): a realm and its users, or AllowUnauthenticated of an open relay.", nameof(options));
             // of TURN's attributes, and its Allocate redirected as a Binding is
             _options.Stun.IsKnownAttribute = TurnAttributeType.IsKnownOfTurn;
             _options.Stun.RedirectedMethods.Add(TurnMethod.Allocate);
@@ -196,10 +212,66 @@ namespace SharpTurnServer
         /// <summary>The STUN server underneath, of its listeners.</summary>
         public StunServer Stun => _stun;
 
-        public IPEndPoint ListenUdp(IPEndPoint endPoint) => _stun.ListenUdp(endPoint);
-        public IPEndPoint ListenTcp(IPEndPoint endPoint) => _stun.ListenTcp(endPoint);
-        public IPEndPoint ListenTls(IPEndPoint endPoint) => _stun.ListenTls(endPoint);
-        public IPEndPoint ListenDtls(IPEndPoint endPoint) => _stun.ListenDtls(endPoint);
+        public IPEndPoint ListenUdp(IPEndPoint endPoint) => Listening(_stun.ListenUdp(endPoint));
+        public IPEndPoint ListenTcp(IPEndPoint endPoint) => Listening(_stun.ListenTcp(endPoint));
+        public IPEndPoint ListenTls(IPEndPoint endPoint) => Listening(_stun.ListenTls(endPoint));
+        public IPEndPoint ListenDtls(IPEndPoint endPoint) => Listening(_stun.ListenDtls(endPoint));
+
+        // the listeners' endpoints: peers no relay is to reach, of a loop of the server's own
+        private readonly List<IPEndPoint> _listeners = new List<IPEndPoint>();
+
+        private IPEndPoint Listening(IPEndPoint endPoint)
+        {
+            lock (_sync)
+                _listeners.Add(endPoint);
+            return endPoint;
+        }
+
+        // the addresses of this host: of a listener of any address, what a peer of its port would reach
+        private static readonly Lazy<HashSet<IPAddress>> LocalAddresses = new Lazy<HashSet<IPAddress>>(() =>
+        {
+            var addresses = new HashSet<IPAddress>();
+            try
+            {
+                foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
+                        addresses.Add(unicast.Address);
+                }
+            }
+            catch (NetworkInformationException)
+            {
+            }
+            return addresses;
+        });
+
+        private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+        // a peer's endpoint of the server's own listeners': of a relay to it, an allocation of the relay's, or a loop. Another
+        // allocation's relay is a peer as any is: two clients of one server relay to each other of theirs.
+        private bool IsOwn(IPEndPoint peer)
+        {
+            var address = Normalize(peer.Address);
+            bool local = IPAddress.IsLoopback(address) || LocalAddresses.Value.Contains(address)
+                || address.Equals(_options.RelayAddress) || address.Equals(_options.RelayAddressV6) || address.Equals(_options.AdvertisedRelayAddress);
+            lock (_sync)
+            {
+                foreach (var listener in _listeners)
+                {
+                    if (listener.Port == peer.Port && (local && (listener.Address.Equals(IPAddress.Any) || listener.Address.Equals(IPAddress.IPv6Any)) || Normalize(listener.Address).Equals(address)))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        // whether the peer may be relayed to: not of the server's own, and of the options' choice
+        private bool IsAllowed(IPEndPoint peer)
+        {
+            if (peer == null || IsOwn(peer))
+                return false;
+            return _options.AllowPeer == null || _options.AllowPeer(peer);
+        }
 
         /// <summary>The allocations there are.</summary>
         public int AllocationCount
@@ -285,8 +357,12 @@ namespace SharpTurnServer
 
             lock (_sync)
             {
-                if (request.Username != null && _allocations.Values.Count(a => a.Username == request.Username) >= _options.MaxAllocationsPerUser)
+                // the reservations of EVEN-PORT ports too, as each holds a port as an allocation does
+                if (request.Username != null && _allocations.Values.Count(a => a.Username == request.Username)
+                    + _reservations.Values.Count(r => r.Username == request.Username) >= _options.MaxAllocationsPerUser)
                     return request.Error(TurnErrorCode.AllocationQuotaReached, "Allocation Quota Reached");
+                if (_allocations.Count + _reservations.Count >= _options.MaxAllocations)
+                    return request.Error(TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
             }
 
             DateTime expires = DateTime.UtcNow + Lifetime(message, false);
@@ -330,7 +406,7 @@ namespace SharpTurnServer
                         random.GetBytes(value);
                     allocation.ReservationToken = value;
                     lock (_sync)
-                        _reservations[Convert.ToBase64String(value)] = new Reservation { Socket = reserved, Expires = DateTime.UtcNow + ReservationLifetime };
+                        _reservations[Convert.ToBase64String(value)] = new Reservation { Socket = reserved, Expires = DateTime.UtcNow + ReservationLifetime, Username = request.Username };
                 }
 
                 // the IPv6 relay of a dual allocation, or the reason there is none (RFC 8656 7.2 step 9)
@@ -412,10 +488,13 @@ namespace SharpTurnServer
                 if (peers.Any(p => allocation.RelayOf(p.AddressFamily) == null))
                     return request.Error(TurnErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
             }
-            if (_options.AllowPeer != null && peers.Any(p => !_options.AllowPeer(p)))
+            if (peers.Any(p => !IsAllowed(p)))
                 return request.Error(TurnErrorCode.Forbidden, "Forbidden");
             lock (_sync)
             {
+                int added = peers.Select(p => p.Address).Distinct().Count(a => !allocation.Permissions.ContainsKey(a));
+                if (allocation.Permissions.Count + added > _options.MaxPermissionsPerAllocation)
+                    return request.Error(TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
                 foreach (var peer in peers)
                     allocation.Permissions[peer.Address] = DateTime.UtcNow + PermissionLifetime;
             }
@@ -437,11 +516,13 @@ namespace SharpTurnServer
                 if (allocation.RelayOf(peer.AddressFamily) == null)
                     return request.Error(TurnErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
             }
-            if (_options.AllowPeer != null && !_options.AllowPeer(peer))
+            if (!IsAllowed(peer))
                 return request.Error(TurnErrorCode.Forbidden, "Forbidden");
 
             lock (_sync)
             {
+                if (!allocation.Permissions.ContainsKey(peer.Address) && allocation.Permissions.Count >= _options.MaxPermissionsPerAllocation)
+                    return request.Error(TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
                 // the channel bound to another peer, or the peer to another channel (RFC 8656 12.2)
                 if (allocation.Channels.TryGetValue(channel, out var bound) && !bound.Peer.Equals(peer))
                     return request.Error(StunErrorCode.BadRequest, "Bad Request");
@@ -638,7 +719,7 @@ namespace SharpTurnServer
             var data = indication.GetAttribute(TurnAttributeType.Data);
             if (peer == null || data == null)
                 return;
-            if (_options.AllowPeer != null && !_options.AllowPeer(peer))
+            if (!IsAllowed(peer))
                 return;
             SendToPeer(connection.Key, peer, data.Value, 0, data.Value.Length, indication.HasAttribute(TurnAttributeType.DontFragment), true);
         }
@@ -723,6 +804,7 @@ namespace SharpTurnServer
         private void RemoveRelay(Allocation allocation, Relay relay, string why)
         {
             bool last;
+            Socket reserved = null;
             lock (_sync)
             {
                 if (!allocation.Relays.Remove(relay))
@@ -738,9 +820,16 @@ namespace SharpTurnServer
                     allocation.Closed = true;
                     if (_allocations.TryGetValue(allocation.Key, out var current) && current == allocation)
                         _allocations.Remove(allocation.Key);
+                    // the port it reserved of EVEN-PORT, of no other allocation taken yet, released with it
+                    if (allocation.ReservationToken != null && _reservations.TryGetValue(Convert.ToBase64String(allocation.ReservationToken), out var reservation))
+                    {
+                        _reservations.Remove(Convert.ToBase64String(allocation.ReservationToken));
+                        reserved = reservation.Socket;
+                    }
                 }
             }
             relay.Socket.Dispose();
+            reserved?.Dispose();
             Trace($"Relay {relay.EndPoint} of {allocation.Connection.RemoteEndPoint} {why}");
         }
 

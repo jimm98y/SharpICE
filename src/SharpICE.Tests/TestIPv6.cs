@@ -143,6 +143,8 @@ namespace SharpICE.Tests
                 },
                 RelayAddress = IPAddress.Loopback,
                 RelayAddressV6 = IPAddress.IPv6Loopback,
+                // the peers of the test are of the loopback
+                AllowPeer = peer => true,
             });
             string uri = "turn:[::1]:" + server.ListenUdp(new IPEndPoint(IPAddress.IPv6Loopback, 0)).Port;
             IceAgentOptions Relayed(IceRole role)

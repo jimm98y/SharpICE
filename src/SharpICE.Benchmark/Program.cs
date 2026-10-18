@@ -63,6 +63,8 @@ async Task Turn(string transport, bool toClient)
     var serverOptions = new TurnServerOptions
     {
         Stun = new StunServerOptions { Realm = "benchmark", Users = new Dictionary<string, string> { ["user"] = "pass" }, AuthenticateBinding = false },
+        // its peer is of the loopback
+        AllowPeer = peer => true,
     };
     using var server = new TurnServer(serverOptions);
     var listener = transport == "udp" ? server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0)) : server.ListenTcp(new IPEndPoint(IPAddress.Loopback, 0));

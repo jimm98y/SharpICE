@@ -201,6 +201,26 @@ namespace SharpStunServer
         /// <summary>How long an association of DTLS is kept of no datagram of its peer.</summary>
         public TimeSpan DtlsIdleTimeout { get; set; } = TimeSpan.FromMinutes(1);
 
+        /// <summary>
+        /// The connections of TCP and TLS at most at once, of all listeners: past them, a new one is closed as it is accepted.
+        /// </summary>
+        public int MaxConnections { get; set; } = 1000;
+
+        /// <summary>The associations of DTLS at most at once - a thread each - of each listener: past them, a new peer is ignored.</summary>
+        public int MaxDtlsPeers { get; set; } = 1000;
+
+        /// <summary>
+        /// How long a connection of TCP or TLS has for its TLS handshake and its first message: past it, it is closed, as one
+        /// that sends nothing would hold its socket for ever.
+        /// </summary>
+        public TimeSpan FirstMessageTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+        /// <summary>
+        /// How long a connection of TCP or TLS may send nothing once it has: past it, it is closed. Longer than a TURN
+        /// client's refreshes, of 9 minutes at most.
+        /// </summary>
+        public TimeSpan ConnectionIdleTimeout { get; set; } = TimeSpan.FromMinutes(15);
+
         /// <summary>The SOFTWARE of its responses; none, of null.</summary>
         public string Software { get; set; } = "SharpStunServer";
 
@@ -362,6 +382,11 @@ namespace SharpStunServer
                 }
                 if (request == null)
                     continue;
+                if (peers.Count >= _options.MaxDtlsPeers)
+                {
+                    Trace($"DTLS of {from} refused: {_options.MaxDtlsPeers} associations already");
+                    continue;
+                }
                 peer = new QueuedDatagramTransport(sender, from);
                 if (!peers.TryAdd(from, peer))
                     continue;
@@ -404,11 +429,12 @@ namespace SharpStunServer
                             break;
                         continue;
                     }
-                    Receive(connection, buffer, 0, count);
+                    ReceiveSafely(connection, buffer, 0, count);
                 }
             }
-            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is TlsException || ex is ObjectDisposedException)
+            catch (Exception ex)
             {
+                // of a thread of its own: whatever ends it is the association's alone, never the process's
                 Trace($"DTLS of {from} ended: {ex.Message}");
             }
             finally
@@ -478,7 +504,7 @@ namespace SharpStunServer
                     connection = UdpConnection(local, remote, sender);
                     connections[remote] = connection;
                 }
-                Receive(connection, buffer, 0, received);
+                ReceiveSafely(connection, buffer, 0, received);
             }
         }
 
@@ -499,8 +525,44 @@ namespace SharpStunServer
                 {
                     continue;
                 }
-                _ = ServeStreamAsync(client, tls);
+                if (Interlocked.Increment(ref _connections) > _options.MaxConnections)
+                {
+                    Interlocked.Decrement(ref _connections);
+                    Trace($"Connection of {client.Client.RemoteEndPoint} refused: {_options.MaxConnections} already");
+                    client.Dispose();
+                    continue;
+                }
+                _ = ServeStreamCountedAsync(client, tls);
             }
+        }
+
+        private int _connections;
+
+        private async Task ServeStreamCountedAsync(TcpClient client, bool tls)
+        {
+            try
+            {
+                await ServeStreamAsync(client, tls).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Trace($"Connection failed: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _connections);
+            }
+        }
+
+        // the connection's buffer of a message of the length given, of the pool: the one it has, or a larger one of what it holds
+        private static byte[] Grow(byte[] buffer, int length, int kept)
+        {
+            if (buffer.Length >= length)
+                return buffer;
+            byte[] larger = ArrayPool<byte>.Shared.Rent(length);
+            Buffer.BlockCopy(buffer, 0, larger, 0, kept);
+            ArrayPool<byte>.Shared.Return(buffer, true);
+            return larger;
         }
 
         // a connection of STUN, each message of its own length (RFC 8489 6.2.2), and of ChannelData, each padded to 4 bytes
@@ -508,10 +570,14 @@ namespace SharpStunServer
         private async Task ServeStreamAsync(TcpClient client, bool tls)
         {
             using (client)
+            using (var deadline = new CancellationTokenSource())
+            // past its deadline - its first message, or its silence after - the connection closed under its reads
+            using (deadline.Token.Register(() => client.Dispose()))
             {
                 var from = Normalize((IPEndPoint)client.Client.RemoteEndPoint);
                 var local = (IPEndPoint)client.Client.LocalEndPoint;
                 StunServerConnection connection = null;
+                deadline.CancelAfter(_options.FirstMessageTimeout);
                 try
                 {
                     Stream stream = client.GetStream();
@@ -529,9 +595,9 @@ namespace SharpStunServer
                             lock (writing)
                                 stream.Write(data, offset, count);
                         });
-                        // the connection's one buffer, of a pool, of the longest message there is: a STUN message's header and
-                        // 65535 bytes
-                        byte[] buffer = ArrayPool<byte>.Shared.Rent(StunMessage.HeaderLength + ushort.MaxValue);
+                        // the connection's one buffer, of a pool: of a datagram's size, larger only as a message takes it, so that
+                        // a connection that sends nothing holds little
+                        byte[] buffer = ArrayPool<byte>.Shared.Rent(1500);
                         try
                         {
                             while (!_cts.IsCancellationRequested)
@@ -541,9 +607,12 @@ namespace SharpStunServer
                                 if (StunFraming.IsChannelData(buffer[0]))
                                 {
                                     int dataLength = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(2));
-                                    if (!await ReadAsync(stream, buffer, 4, (dataLength + 3) & ~3).ConfigureAwait(false))
+                                    int padded = (dataLength + 3) & ~3;
+                                    buffer = Grow(buffer, 4 + padded, 4);
+                                    if (!await ReadAsync(stream, buffer, 4, padded).ConfigureAwait(false))
                                         return;
-                                    Receive(connection, buffer, 0, 4 + dataLength);
+                                    deadline.CancelAfter(_options.ConnectionIdleTimeout);
+                                    ReceiveSafely(connection, buffer, 0, 4 + dataLength);
                                     continue;
                                 }
                                 if (!await ReadAsync(stream, buffer, 4, StunMessage.HeaderLength - 4).ConfigureAwait(false))
@@ -551,9 +620,11 @@ namespace SharpStunServer
                                 if ((buffer[0] & 0xC0) != 0 || BinaryPrimitives.ReadUInt32BigEndian(buffer.AsSpan(4)) != StunMessage.MagicCookie)
                                     return;
                                 int length = BinaryPrimitives.ReadUInt16BigEndian(buffer.AsSpan(2));
+                                buffer = Grow(buffer, StunMessage.HeaderLength + length, StunMessage.HeaderLength);
                                 if (!await ReadAsync(stream, buffer, StunMessage.HeaderLength, length).ConfigureAwait(false))
                                     return;
-                                Receive(connection, buffer, 0, StunMessage.HeaderLength + length);
+                                deadline.CancelAfter(_options.ConnectionIdleTimeout);
+                                ReceiveSafely(connection, buffer, 0, StunMessage.HeaderLength + length);
                             }
                         }
                         finally
@@ -618,6 +689,27 @@ namespace SharpStunServer
         /// handed to the handler of it, anything else discarded (RFC 8489 6.3).
         /// </summary>
         public void Receive(StunServerConnection connection, byte[] buffer, int offset, int count)
+        {
+            if (connection == null)
+                throw new ArgumentNullException(nameof(connection));
+            ReceiveCore(connection, buffer, offset, count);
+        }
+
+        // of the server's own loops: an exception of a message - of what it is, or of a handler - ends that message alone, not
+        // the loop of the others
+        private void ReceiveSafely(StunServerConnection connection, byte[] buffer, int offset, int count)
+        {
+            try
+            {
+                ReceiveCore(connection, buffer, offset, count);
+            }
+            catch (Exception ex)
+            {
+                Trace($"A message of {connection.RemoteEndPoint} failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private void ReceiveCore(StunServerConnection connection, byte[] buffer, int offset, int count)
         {
             if (count >= 4 && StunFraming.IsChannelData(buffer[offset]))
             {

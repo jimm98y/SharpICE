@@ -59,8 +59,8 @@ namespace SharpICE
         /// <summary>What follows the fields above, name and value: "generation 0", "ufrag abcd", "network-id 1".</summary>
         public List<KeyValuePair<string, string>> Extensions { get; } = new List<KeyValuePair<string, string>>();
 
-        /// <summary>The endpoint of a candidate of an IP address; null of one of a name.</summary>
-        public IPEndPoint EndPoint => IPAddress.TryParse(Address, out IPAddress address) ? new IPEndPoint(address, Port) : null;
+        /// <summary>The endpoint of a candidate of an IP address; null of one of a name, or of a port that is none.</summary>
+        public IPEndPoint EndPoint => Port >= 0 && Port <= IPEndPoint.MaxPort && IPAddress.TryParse(Address, out IPAddress address) ? new IPEndPoint(address, Port) : null;
 
         public bool IsUdp => string.Equals(Transport, "udp", StringComparison.OrdinalIgnoreCase);
 

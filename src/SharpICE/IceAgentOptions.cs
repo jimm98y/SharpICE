@@ -106,6 +106,24 @@ namespace SharpICE
         public TimeSpan MdnsTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
         /// <summary>
+        /// Whether to resolve the peer's candidates of host names of DNS (RFC 8839 5.1) - other than mDNS ones - which no browser
+        /// sends: of false, the default, they are left out, as each would make the agent look up a name the peer chose.
+        /// </summary>
+        public bool ResolveHostNames { get; set; } = false;
+
+        /// <summary>The peer's candidates the agent takes at most - those being resolved of mDNS too; more are left out.</summary>
+        public int MaxRemoteCandidates { get; set; } = 100;
+
+        /// <summary>The connections of ICE-TCP its passive candidates take at most at once; more are closed as they come.</summary>
+        public int MaxTcpConnections { get; set; } = 32;
+
+        /// <summary>
+        /// How long a connection to a passive candidate has to make a pair of its checks: past it, one of none is closed, as
+        /// anyone may connect.
+        /// </summary>
+        public TimeSpan TcpCheckTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+        /// <summary>
         /// Whether to hide the local addresses behind names of mDNS, as browsers do (draft-ietf-mmusic-mdns-ice-candidates): each
         /// host candidate of a random "&lt;uuid&gt;.local" rather than its address, which the agent answers queries of multicast
         /// DNS of; a server reflexive one of "raddr 0.0.0.0 rport 0". A peer on another link resolves none of them, and learns

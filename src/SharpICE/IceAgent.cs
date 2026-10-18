@@ -802,6 +802,17 @@ namespace SharpICE
             // of TCP, active and passive ones; simultaneous-open is not done
             if (candidate.IsTcp && candidate.TcpType != IceCandidate.TcpActive && candidate.TcpType != IceCandidate.TcpPassive)
                 return false;
+            if (candidate.Port < 0 || candidate.Port > IPEndPoint.MaxPort)
+                return false;
+            lock (_sync)
+            {
+                // of a peer that signals without end: each candidate pairs, and is checked
+                if (_remoteCandidates.Count + _resolving >= _options.MaxRemoteCandidates)
+                {
+                    Trace($"Candidate left out, of {_options.MaxRemoteCandidates} already: {candidate}");
+                    return false;
+                }
+            }
 
             var endPoint = candidate.EndPoint;
             if (endPoint == null)
@@ -821,6 +832,8 @@ namespace SharpICE
                     _ = ResolveMdnsAsync(candidate);
                     return true;
                 }
+                if (!_options.ResolveHostNames)
+                    return false;
                 try
                 {
                     var address = Dns.GetHostAddresses(candidate.Address).FirstOrDefault();
@@ -829,7 +842,7 @@ namespace SharpICE
                     candidate.Address = address.ToString();
                     endPoint = new IPEndPoint(address, candidate.Port);
                 }
-                catch (SocketException)
+                catch (Exception ex) when (ex is SocketException || ex is ArgumentException)
                 {
                     return false;
                 }
