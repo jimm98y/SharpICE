@@ -1,0 +1,64 @@
+const SharpTurnCommon.TurnAttributeType.AdditionalAddressFamily = 32768 -> ushort
+const SharpTurnCommon.TurnAttributeType.AddressErrorCode = 32769 -> ushort
+const SharpTurnCommon.TurnAttributeType.ChannelNumber = 12 -> ushort
+const SharpTurnCommon.TurnAttributeType.Data = 19 -> ushort
+const SharpTurnCommon.TurnAttributeType.DontFragment = 26 -> ushort
+const SharpTurnCommon.TurnAttributeType.EvenPort = 24 -> ushort
+const SharpTurnCommon.TurnAttributeType.Icmp = 32772 -> ushort
+const SharpTurnCommon.TurnAttributeType.Lifetime = 13 -> ushort
+const SharpTurnCommon.TurnAttributeType.RequestedAddressFamily = 23 -> ushort
+const SharpTurnCommon.TurnAttributeType.RequestedTransport = 25 -> ushort
+const SharpTurnCommon.TurnAttributeType.ReservationToken = 34 -> ushort
+const SharpTurnCommon.TurnAttributeType.XorPeerAddress = 18 -> ushort
+const SharpTurnCommon.TurnAttributeType.XorRelayedAddress = 22 -> ushort
+const SharpTurnCommon.TurnConstants.MaxChannel = 20479 -> ushort
+const SharpTurnCommon.TurnConstants.MinChannel = 16384 -> ushort
+const SharpTurnCommon.TurnConstants.Udp = 17 -> byte
+const SharpTurnCommon.TurnErrorCode.AddressFamilyNotSupported = 440 -> int
+const SharpTurnCommon.TurnErrorCode.AllocationMismatch = 437 -> int
+const SharpTurnCommon.TurnErrorCode.AllocationQuotaReached = 486 -> int
+const SharpTurnCommon.TurnErrorCode.Forbidden = 403 -> int
+const SharpTurnCommon.TurnErrorCode.InsufficientCapacity = 508 -> int
+const SharpTurnCommon.TurnErrorCode.PeerAddressFamilyMismatch = 443 -> int
+const SharpTurnCommon.TurnErrorCode.UnsupportedTransportProtocol = 442 -> int
+const SharpTurnCommon.TurnErrorCode.WrongCredentials = 441 -> int
+const SharpTurnCommon.TurnMethod.Allocate = 3 -> ushort
+const SharpTurnCommon.TurnMethod.ChannelBind = 9 -> ushort
+const SharpTurnCommon.TurnMethod.CreatePermission = 8 -> ushort
+const SharpTurnCommon.TurnMethod.Data = 7 -> ushort
+const SharpTurnCommon.TurnMethod.Refresh = 4 -> ushort
+const SharpTurnCommon.TurnMethod.Send = 6 -> ushort
+SharpTurnCommon.TurnAttributeType
+SharpTurnCommon.TurnChannelData
+SharpTurnCommon.TurnConstants
+SharpTurnCommon.TurnErrorCode
+SharpTurnCommon.TurnIndication
+SharpTurnCommon.TurnMessageExtensions
+SharpTurnCommon.TurnMethod
+static readonly SharpTurnCommon.TurnConstants.ChannelLifetime -> System.TimeSpan
+static readonly SharpTurnCommon.TurnConstants.DefaultLifetime -> System.TimeSpan
+static readonly SharpTurnCommon.TurnConstants.MaxLifetime -> System.TimeSpan
+static readonly SharpTurnCommon.TurnConstants.PermissionLifetime -> System.TimeSpan
+static SharpTurnCommon.TurnAttributeType.IsKnown(ushort type) -> bool
+static SharpTurnCommon.TurnAttributeType.IsKnownOfTurn(ushort type) -> bool
+static SharpTurnCommon.TurnChannelData.Create(ushort channel, byte[] buffer, int offset, int count, bool padded) -> byte[]
+static SharpTurnCommon.TurnChannelData.Frame(System.Span<byte> destination, ushort channel, int dataLength, bool padded) -> int
+static SharpTurnCommon.TurnChannelData.TryRead(byte[] buffer, int offset, int count, out ushort channel, out int dataOffset, out int dataLength) -> bool
+static SharpTurnCommon.TurnChannelData.Write(System.Span<byte> destination, ushort channel, System.ReadOnlySpan<byte> data, bool padded) -> int
+static SharpTurnCommon.TurnIndication.Frame(System.Span<byte> destination, ushort method, System.Net.IPEndPoint peer, int dataLength, bool dontFragment = false) -> int
+static SharpTurnCommon.TurnIndication.HeaderSize(System.Net.IPEndPoint peer) -> int
+static SharpTurnCommon.TurnIndication.Size(System.Net.IPEndPoint peer, int dataLength, bool dontFragment) -> int
+static SharpTurnCommon.TurnIndication.Write(System.Span<byte> destination, ushort method, System.Net.IPEndPoint peer, System.ReadOnlySpan<byte> data, bool dontFragment = false) -> int
+static SharpTurnCommon.TurnMessageExtensions.AddAddressError(this SharpStunCommon.StunMessage message, System.Net.Sockets.AddressFamily family, int code, string reason) -> SharpStunCommon.StunMessage
+static SharpTurnCommon.TurnMessageExtensions.AddAddressFamily(this SharpStunCommon.StunMessage message, ushort type, System.Net.Sockets.AddressFamily family) -> SharpStunCommon.StunMessage
+static SharpTurnCommon.TurnMessageExtensions.AddChannelNumber(this SharpStunCommon.StunMessage message, ushort channel) -> SharpStunCommon.StunMessage
+static SharpTurnCommon.TurnMessageExtensions.AddEvenPort(this SharpStunCommon.StunMessage message, bool reserveNext) -> SharpStunCommon.StunMessage
+static SharpTurnCommon.TurnMessageExtensions.AddLifetime(this SharpStunCommon.StunMessage message, System.TimeSpan lifetime) -> SharpStunCommon.StunMessage
+static SharpTurnCommon.TurnMessageExtensions.AddRequestedTransport(this SharpStunCommon.StunMessage message, byte protocol = 17) -> SharpStunCommon.StunMessage
+static SharpTurnCommon.TurnMessageExtensions.GetAddressError(this SharpStunCommon.StunMessage message) -> (System.Net.Sockets.AddressFamily Family, int Code, string Reason)?
+static SharpTurnCommon.TurnMessageExtensions.GetAddressFamily(this SharpStunCommon.StunMessage message, ushort type) -> System.Net.Sockets.AddressFamily?
+static SharpTurnCommon.TurnMessageExtensions.GetChannelNumber(this SharpStunCommon.StunMessage message) -> ushort?
+static SharpTurnCommon.TurnMessageExtensions.GetEvenPort(this SharpStunCommon.StunMessage message) -> bool?
+static SharpTurnCommon.TurnMessageExtensions.GetIcmp(this SharpStunCommon.StunMessage message) -> (byte Type, byte Code)?
+static SharpTurnCommon.TurnMessageExtensions.GetLifetime(this SharpStunCommon.StunMessage message) -> System.TimeSpan?
+static SharpTurnCommon.TurnMessageExtensions.GetRequestedTransport(this SharpStunCommon.StunMessage message) -> byte?

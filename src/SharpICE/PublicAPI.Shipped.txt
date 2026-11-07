@@ -1,0 +1,178 @@
+const SharpICE.IceCandidate.RtpComponent = 1 -> int
+const SharpICE.IceCandidate.TcpActive = "active" -> string
+const SharpICE.IceCandidate.TcpPassive = "passive" -> string
+const SharpICE.IceCandidate.TcpSimultaneousOpen = "so" -> string
+override SharpICE.IceCandidate.ToString() -> string
+override SharpICE.IceCandidatePair.ToString() -> string
+SharpICE.IceAgent
+SharpICE.IceAgent.AddRemoteCandidate(SharpICE.IceCandidate candidate) -> bool
+SharpICE.IceAgent.AddRemoteCandidate(string candidate) -> bool
+SharpICE.IceAgent.CandidateGathered -> System.EventHandler<SharpICE.IceCandidate>
+SharpICE.IceAgent.Close() -> void
+SharpICE.IceAgent.DataReceived -> System.EventHandler<SharpICE.IceDataReceivedEventArgs>
+SharpICE.IceAgent.Dispose() -> void
+SharpICE.IceAgent.GatherCandidatesAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<SharpICE.IceCandidate>>
+SharpICE.IceAgent.IceAgent(SharpICE.IceAgentOptions options = null) -> void
+SharpICE.IceAgent.IsLite.get -> bool
+SharpICE.IceAgent.LocalCandidates.get -> System.Collections.Generic.IReadOnlyList<SharpICE.IceCandidate>
+SharpICE.IceAgent.LocalPassword.get -> string
+SharpICE.IceAgent.LocalUfrag.get -> string
+SharpICE.IceAgent.Pairs.get -> System.Collections.Generic.IReadOnlyList<SharpICE.IceCandidatePair>
+SharpICE.IceAgent.RemoteCandidates.get -> System.Collections.Generic.IReadOnlyList<SharpICE.IceCandidate>
+SharpICE.IceAgent.RemoteGatheringComplete.get -> bool
+SharpICE.IceAgent.RemoteIsLite.get -> bool
+SharpICE.IceAgent.RemotePassword.get -> string
+SharpICE.IceAgent.RemoteUfrag.get -> string
+SharpICE.IceAgent.Restart() -> void
+SharpICE.IceAgent.Role.get -> SharpICE.IceRole
+SharpICE.IceAgent.SelectedPair.get -> SharpICE.IceCandidatePair
+SharpICE.IceAgent.SelectedPairChanged -> System.EventHandler<SharpICE.IceCandidatePair>
+SharpICE.IceAgent.Send(byte[] buffer, int offset, int count) -> bool
+SharpICE.IceAgent.SetRemoteCredentials(string ufrag, string password) -> bool
+SharpICE.IceAgent.SetRemoteGatheringComplete() -> void
+SharpICE.IceAgent.SetRemoteLite(bool lite) -> void
+SharpICE.IceAgent.Start() -> void
+SharpICE.IceAgent.State.get -> SharpICE.IceConnectionState
+SharpICE.IceAgent.StateChanged -> System.EventHandler<SharpICE.IceConnectionState>
+SharpICE.IceAgent.TieBreaker.get -> ulong
+SharpICE.IceAgentOptions
+SharpICE.IceAgentOptions.AddressFilter.get -> System.Func<System.Net.IPAddress, bool>
+SharpICE.IceAgentOptions.AddressFilter.set -> void
+SharpICE.IceAgentOptions.CheckInterval.get -> System.TimeSpan
+SharpICE.IceAgentOptions.CheckInterval.set -> void
+SharpICE.IceAgentOptions.ConsentInterval.get -> System.TimeSpan
+SharpICE.IceAgentOptions.ConsentInterval.set -> void
+SharpICE.IceAgentOptions.ConsentTimeout.get -> System.TimeSpan
+SharpICE.IceAgentOptions.ConsentTimeout.set -> void
+SharpICE.IceAgentOptions.DisconnectedTimeout.get -> System.TimeSpan
+SharpICE.IceAgentOptions.DisconnectedTimeout.set -> void
+SharpICE.IceAgentOptions.IceAgentOptions() -> void
+SharpICE.IceAgentOptions.IncludeIPv6.get -> bool
+SharpICE.IceAgentOptions.IncludeIPv6.set -> void
+SharpICE.IceAgentOptions.IncludeLoopback.get -> bool
+SharpICE.IceAgentOptions.IncludeLoopback.set -> void
+SharpICE.IceAgentOptions.IncludeTcp.get -> bool
+SharpICE.IceAgentOptions.IncludeTcp.set -> void
+SharpICE.IceAgentOptions.IncludeUdp.get -> bool
+SharpICE.IceAgentOptions.IncludeUdp.set -> void
+SharpICE.IceAgentOptions.InitialRetransmissionTimeout.get -> System.TimeSpan
+SharpICE.IceAgentOptions.InitialRetransmissionTimeout.set -> void
+SharpICE.IceAgentOptions.Lite.get -> bool
+SharpICE.IceAgentOptions.Lite.set -> void
+SharpICE.IceAgentOptions.MaxRemoteCandidates.get -> int
+SharpICE.IceAgentOptions.MaxRemoteCandidates.set -> void
+SharpICE.IceAgentOptions.MaxTcpConnections.get -> int
+SharpICE.IceAgentOptions.MaxTcpConnections.set -> void
+SharpICE.IceAgentOptions.MaxTransmissions.get -> int
+SharpICE.IceAgentOptions.MaxTransmissions.set -> void
+SharpICE.IceAgentOptions.MdnsCandidates.get -> bool
+SharpICE.IceAgentOptions.MdnsCandidates.set -> void
+SharpICE.IceAgentOptions.MdnsTimeout.get -> System.TimeSpan
+SharpICE.IceAgentOptions.MdnsTimeout.set -> void
+SharpICE.IceAgentOptions.PortMax.get -> int
+SharpICE.IceAgentOptions.PortMax.set -> void
+SharpICE.IceAgentOptions.PortMin.get -> int
+SharpICE.IceAgentOptions.PortMin.set -> void
+SharpICE.IceAgentOptions.PublicAddresses.get -> System.Collections.Generic.IList<System.Net.IPAddress>
+SharpICE.IceAgentOptions.PublicAddresses.set -> void
+SharpICE.IceAgentOptions.RelayOnly.get -> bool
+SharpICE.IceAgentOptions.RelayOnly.set -> void
+SharpICE.IceAgentOptions.ResolveHostNames.get -> bool
+SharpICE.IceAgentOptions.ResolveHostNames.set -> void
+SharpICE.IceAgentOptions.ResolveMdns.get -> bool
+SharpICE.IceAgentOptions.ResolveMdns.set -> void
+SharpICE.IceAgentOptions.Role.get -> SharpICE.IceRole
+SharpICE.IceAgentOptions.Role.set -> void
+SharpICE.IceAgentOptions.Software.get -> string
+SharpICE.IceAgentOptions.Software.set -> void
+SharpICE.IceAgentOptions.StunServers.get -> System.Collections.Generic.List<string>
+SharpICE.IceAgentOptions.StunServerTimeout.get -> System.TimeSpan
+SharpICE.IceAgentOptions.StunServerTimeout.set -> void
+SharpICE.IceAgentOptions.TcpCheckTimeout.get -> System.TimeSpan
+SharpICE.IceAgentOptions.TcpCheckTimeout.set -> void
+SharpICE.IceAgentOptions.Trace.get -> System.Action<string>
+SharpICE.IceAgentOptions.Trace.set -> void
+SharpICE.IceAgentOptions.TurnCertificateValidation.get -> System.Net.Security.RemoteCertificateValidationCallback
+SharpICE.IceAgentOptions.TurnCertificateValidation.set -> void
+SharpICE.IceAgentOptions.TurnServers.get -> System.Collections.Generic.List<SharpICE.IceTurnServer>
+SharpICE.IceAgentOptions.TurnServerTimeout.get -> System.TimeSpan
+SharpICE.IceAgentOptions.TurnServerTimeout.set -> void
+SharpICE.IceCandidate
+SharpICE.IceCandidate.Address.get -> string
+SharpICE.IceCandidate.Address.set -> void
+SharpICE.IceCandidate.Component.get -> int
+SharpICE.IceCandidate.Component.set -> void
+SharpICE.IceCandidate.EndPoint.get -> System.Net.IPEndPoint
+SharpICE.IceCandidate.Extensions.get -> System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, string>>
+SharpICE.IceCandidate.Foundation.get -> string
+SharpICE.IceCandidate.Foundation.set -> void
+SharpICE.IceCandidate.IceCandidate() -> void
+SharpICE.IceCandidate.IsTcp.get -> bool
+SharpICE.IceCandidate.IsUdp.get -> bool
+SharpICE.IceCandidate.LocalPreference.get -> int
+SharpICE.IceCandidate.Port.get -> int
+SharpICE.IceCandidate.Port.set -> void
+SharpICE.IceCandidate.Priority.get -> uint
+SharpICE.IceCandidate.Priority.set -> void
+SharpICE.IceCandidate.RelatedAddress.get -> string
+SharpICE.IceCandidate.RelatedAddress.set -> void
+SharpICE.IceCandidate.RelatedPort.get -> int
+SharpICE.IceCandidate.RelatedPort.set -> void
+SharpICE.IceCandidate.TcpType.get -> string
+SharpICE.IceCandidate.TcpType.set -> void
+SharpICE.IceCandidate.Transport.get -> string
+SharpICE.IceCandidate.Transport.set -> void
+SharpICE.IceCandidate.Type.get -> SharpICE.IceCandidateType
+SharpICE.IceCandidate.Type.set -> void
+SharpICE.IceCandidatePair
+SharpICE.IceCandidatePair.Foundation.get -> string
+SharpICE.IceCandidatePair.IsTcp.get -> bool
+SharpICE.IceCandidatePair.LastConsent.get -> System.DateTime
+SharpICE.IceCandidatePair.LastSucceeded.get -> System.DateTime
+SharpICE.IceCandidatePair.Local.get -> SharpICE.IceCandidate
+SharpICE.IceCandidatePair.LocalEndPoint.get -> System.Net.IPEndPoint
+SharpICE.IceCandidatePair.Nominated.get -> bool
+SharpICE.IceCandidatePair.Priority.get -> ulong
+SharpICE.IceCandidatePair.Remote.get -> SharpICE.IceCandidate
+SharpICE.IceCandidatePair.RemoteEndPoint.get -> System.Net.IPEndPoint
+SharpICE.IceCandidatePair.State.get -> SharpICE.IceCandidatePairState
+SharpICE.IceCandidatePairState
+SharpICE.IceCandidatePairState.Failed = 4 -> SharpICE.IceCandidatePairState
+SharpICE.IceCandidatePairState.Frozen = 0 -> SharpICE.IceCandidatePairState
+SharpICE.IceCandidatePairState.InProgress = 2 -> SharpICE.IceCandidatePairState
+SharpICE.IceCandidatePairState.Succeeded = 3 -> SharpICE.IceCandidatePairState
+SharpICE.IceCandidatePairState.Waiting = 1 -> SharpICE.IceCandidatePairState
+SharpICE.IceCandidateType
+SharpICE.IceCandidateType.Host = 0 -> SharpICE.IceCandidateType
+SharpICE.IceCandidateType.PeerReflexive = 2 -> SharpICE.IceCandidateType
+SharpICE.IceCandidateType.Relayed = 3 -> SharpICE.IceCandidateType
+SharpICE.IceCandidateType.ServerReflexive = 1 -> SharpICE.IceCandidateType
+SharpICE.IceConnectionState
+SharpICE.IceConnectionState.Checking = 1 -> SharpICE.IceConnectionState
+SharpICE.IceConnectionState.Closed = 5 -> SharpICE.IceConnectionState
+SharpICE.IceConnectionState.Connected = 2 -> SharpICE.IceConnectionState
+SharpICE.IceConnectionState.Disconnected = 3 -> SharpICE.IceConnectionState
+SharpICE.IceConnectionState.Failed = 4 -> SharpICE.IceConnectionState
+SharpICE.IceConnectionState.New = 0 -> SharpICE.IceConnectionState
+SharpICE.IceDataReceivedEventArgs
+SharpICE.IceDataReceivedEventArgs.Buffer.get -> byte[]
+SharpICE.IceDataReceivedEventArgs.Count.get -> int
+SharpICE.IceDataReceivedEventArgs.IceDataReceivedEventArgs(byte[] buffer, int offset, int count, System.Net.IPEndPoint remoteEndPoint) -> void
+SharpICE.IceDataReceivedEventArgs.Offset.get -> int
+SharpICE.IceDataReceivedEventArgs.RemoteEndPoint.get -> System.Net.IPEndPoint
+SharpICE.IceRole
+SharpICE.IceRole.Controlled = 1 -> SharpICE.IceRole
+SharpICE.IceRole.Controlling = 0 -> SharpICE.IceRole
+SharpICE.IceTurnServer
+SharpICE.IceTurnServer.IceTurnServer() -> void
+SharpICE.IceTurnServer.Password.get -> string
+SharpICE.IceTurnServer.Password.set -> void
+SharpICE.IceTurnServer.Uri.get -> string
+SharpICE.IceTurnServer.Uri.set -> void
+SharpICE.IceTurnServer.Username.get -> string
+SharpICE.IceTurnServer.Username.set -> void
+static SharpICE.IceCandidate.ComputePriority(SharpICE.IceCandidateType type, int localPreference, int component, bool tcp = false) -> uint
+static SharpICE.IceCandidate.Parse(string line) -> SharpICE.IceCandidate
+static SharpICE.IceCandidate.TcpLocalPreference(string tcpType, int otherPreference) -> int
+static SharpICE.IceCandidate.TypeName(SharpICE.IceCandidateType type) -> string
+static SharpICE.IceCandidate.TypePreference(SharpICE.IceCandidateType type, bool tcp = false) -> int

@@ -1,0 +1,110 @@
+abstract SharpStunClient.StunTransport.Dispose() -> void
+abstract SharpStunClient.StunTransport.IsReliable.get -> bool
+abstract SharpStunClient.StunTransport.LocalEndPoint.get -> System.Net.IPEndPoint
+abstract SharpStunClient.StunTransport.RedirectAsync(System.Net.IPEndPoint server, string domain, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStunClient.StunTransport>
+abstract SharpStunClient.StunTransport.SendAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+abstract SharpStunClient.StunTransport.SendAsync(byte[] message, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+const SharpStunClient.StunClient.DefaultPort = 3478 -> int
+const SharpStunClient.StunClient.DefaultSecurePort = 5349 -> int
+override SharpStunClient.StunDtlsTransport.Dispose() -> void
+override SharpStunClient.StunDtlsTransport.IsReliable.get -> bool
+override SharpStunClient.StunDtlsTransport.LocalEndPoint.get -> System.Net.IPEndPoint
+override SharpStunClient.StunDtlsTransport.RedirectAsync(System.Net.IPEndPoint server, string domain, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStunClient.StunTransport>
+override SharpStunClient.StunDtlsTransport.SendAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+override SharpStunClient.StunDtlsTransport.SendAsync(byte[] message, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+override SharpStunClient.StunStreamTransport.Dispose() -> void
+override SharpStunClient.StunStreamTransport.IsReliable.get -> bool
+override SharpStunClient.StunStreamTransport.IsStream.get -> bool
+override SharpStunClient.StunStreamTransport.LocalEndPoint.get -> System.Net.IPEndPoint
+override SharpStunClient.StunStreamTransport.RedirectAsync(System.Net.IPEndPoint server, string domain, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStunClient.StunTransport>
+override SharpStunClient.StunStreamTransport.SendAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+override SharpStunClient.StunStreamTransport.SendAsync(byte[] message, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+override SharpStunClient.StunUdpTransport.Dispose() -> void
+override SharpStunClient.StunUdpTransport.IsReliable.get -> bool
+override SharpStunClient.StunUdpTransport.LocalEndPoint.get -> System.Net.IPEndPoint
+override SharpStunClient.StunUdpTransport.RedirectAsync(System.Net.IPEndPoint server, string domain, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStunClient.StunTransport>
+override SharpStunClient.StunUdpTransport.SendAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+override SharpStunClient.StunUdpTransport.SendAsync(byte[] message, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpStunClient.StunClient
+SharpStunClient.StunClient.Closed -> System.EventHandler<System.Exception>
+SharpStunClient.StunClient.ConnectAsync(string uri, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpStunClient.StunClient.DataReceived -> System.EventHandler<SharpStunClient.StunDataEventArgs>
+SharpStunClient.StunClient.Dispose() -> void
+SharpStunClient.StunClient.GetMappedAddressAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint>
+SharpStunClient.StunClient.IndicationReceived -> System.EventHandler<SharpStunClient.StunMessageEventArgs>
+SharpStunClient.StunClient.IsAuthenticated.get -> bool
+SharpStunClient.StunClient.IsConnected.get -> bool
+SharpStunClient.StunClient.Options.get -> SharpStunClient.StunClientOptions
+SharpStunClient.StunClient.Realm.get -> string
+SharpStunClient.StunClient.RequestAsync(SharpStunCommon.StunMessage request, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStunCommon.StunMessage>
+SharpStunClient.StunClient.SendIndicationAsync(SharpStunCommon.StunMessage indication, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpStunClient.StunClient.SendRawAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpStunClient.StunClient.SendRawAsync(byte[] data, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpStunClient.StunClient.StunClient(SharpStunClient.StunClientOptions options = null) -> void
+SharpStunClient.StunClient.StunClient(SharpStunClient.StunTransport transport, SharpStunClient.StunClientOptions options = null) -> void
+SharpStunClient.StunClient.Transport.get -> SharpStunClient.StunTransport
+SharpStunClient.StunClientOptions
+SharpStunClient.StunClientOptions.CertificateValidation.get -> System.Net.Security.RemoteCertificateValidationCallback
+SharpStunClient.StunClientOptions.CertificateValidation.set -> void
+SharpStunClient.StunClientOptions.DnsTimeout.get -> System.TimeSpan
+SharpStunClient.StunClientOptions.DnsTimeout.set -> void
+SharpStunClient.StunClientOptions.InitialRetransmissionTimeout.get -> System.TimeSpan
+SharpStunClient.StunClientOptions.InitialRetransmissionTimeout.set -> void
+SharpStunClient.StunClientOptions.IsKnownAttribute.get -> System.Func<ushort, bool>
+SharpStunClient.StunClientOptions.IsKnownAttribute.set -> void
+SharpStunClient.StunClientOptions.LastWaitMultiplier.get -> int
+SharpStunClient.StunClientOptions.LastWaitMultiplier.set -> void
+SharpStunClient.StunClientOptions.MaxTransmissions.get -> int
+SharpStunClient.StunClientOptions.MaxTransmissions.set -> void
+SharpStunClient.StunClientOptions.Password.get -> string
+SharpStunClient.StunClientOptions.Password.set -> void
+SharpStunClient.StunClientOptions.PreferSha256.get -> bool
+SharpStunClient.StunClientOptions.PreferSha256.set -> void
+SharpStunClient.StunClientOptions.ReliableTimeout.get -> System.TimeSpan
+SharpStunClient.StunClientOptions.ReliableTimeout.set -> void
+SharpStunClient.StunClientOptions.Software.get -> string
+SharpStunClient.StunClientOptions.Software.set -> void
+SharpStunClient.StunClientOptions.StunClientOptions() -> void
+SharpStunClient.StunClientOptions.UseDtls.get -> bool
+SharpStunClient.StunClientOptions.UseDtls.set -> void
+SharpStunClient.StunClientOptions.Username.get -> string
+SharpStunClient.StunClientOptions.Username.set -> void
+SharpStunClient.StunDataEventArgs
+SharpStunClient.StunDataEventArgs.Buffer.get -> byte[]
+SharpStunClient.StunDataEventArgs.Count.get -> int
+SharpStunClient.StunDataEventArgs.Offset.get -> int
+SharpStunClient.StunDataEventArgs.StunDataEventArgs(byte[] buffer, int offset, int count) -> void
+SharpStunClient.StunDtlsTransport
+SharpStunClient.StunException
+SharpStunClient.StunException.Response.get -> SharpStunCommon.StunMessage
+SharpStunClient.StunException.StunException(string message, SharpStunCommon.StunMessage response = null, System.Exception innerException = null) -> void
+SharpStunClient.StunMessageEventArgs
+SharpStunClient.StunMessageEventArgs.Message.get -> SharpStunCommon.StunMessage
+SharpStunClient.StunMessageEventArgs.RemoteEndPoint.get -> System.Net.IPEndPoint
+SharpStunClient.StunMessageEventArgs.StunMessageEventArgs(SharpStunCommon.StunMessage message, System.Net.IPEndPoint remoteEndPoint) -> void
+SharpStunClient.StunStreamTransport
+SharpStunClient.StunStreamTransport.IsSecure.get -> bool
+SharpStunClient.StunTransport
+SharpStunClient.StunTransport.Closed -> System.EventHandler<System.Exception>
+SharpStunClient.StunTransport.DataReceived -> System.EventHandler<SharpStunClient.StunDataEventArgs>
+SharpStunClient.StunTransport.MessageReceived -> System.EventHandler<SharpStunClient.StunMessageEventArgs>
+SharpStunClient.StunTransport.OnClosed(System.Exception error) -> void
+SharpStunClient.StunTransport.OnDataReceived(byte[] buffer, int offset, int count) -> void
+SharpStunClient.StunTransport.OnMessageReceived(SharpStunCommon.StunMessage message, System.Net.IPEndPoint from) -> void
+SharpStunClient.StunTransport.RemoteEndPoint.get -> System.Net.IPEndPoint
+SharpStunClient.StunTransport.RemoteEndPoint.set -> void
+SharpStunClient.StunTransport.StunTransport() -> void
+SharpStunClient.StunUdpTransport
+SharpStunClient.StunUdpTransport.Receive(byte[] buffer, int offset, int count, System.Net.IPEndPoint from) -> bool
+SharpStunClient.StunUdpTransport.Socket.get -> System.Net.Sockets.Socket
+SharpStunClient.StunUdpTransport.StunUdpTransport(System.Net.IPEndPoint server) -> void
+SharpStunClient.StunUdpTransport.StunUdpTransport(System.Net.Sockets.Socket socket, System.Net.IPEndPoint server, bool receive) -> void
+static SharpStunClient.StunClient.CreateBindingRequest(string software = null) -> SharpStunCommon.StunMessage
+static SharpStunClient.StunClient.GetMappedAddress(SharpStunCommon.StunMessage response) -> System.Net.IPEndPoint
+static SharpStunClient.StunClient.GetMappedAddressAsync(System.Net.IPEndPoint server, System.TimeSpan timeout, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint>
+static SharpStunClient.StunClient.GetMappedAddressAsync(System.Net.Sockets.Socket socket, System.Net.IPEndPoint server, System.TimeSpan timeout, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint>
+static SharpStunClient.StunClient.ResolveAllAsync(SharpStunCommon.StunUri uri, System.TimeSpan dnsTimeout, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken), string transportProtocol = null) -> System.Threading.Tasks.Task<System.Collections.Generic.List<System.Net.IPEndPoint>>
+static SharpStunClient.StunClient.ResolveAsync(string server, System.Net.Sockets.AddressFamily family = System.Net.Sockets.AddressFamily.InterNetwork) -> System.Threading.Tasks.Task<System.Net.IPEndPoint>
+static SharpStunClient.StunDtlsTransport.ConnectAsync(System.Net.IPEndPoint server, string host, System.Net.Security.RemoteCertificateValidationCallback validation = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStunClient.StunDtlsTransport>
+static SharpStunClient.StunStreamTransport.ConnectAsync(System.Net.IPEndPoint server, string tlsHost = null, System.Net.Security.RemoteCertificateValidationCallback validation = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStunClient.StunStreamTransport>
+virtual SharpStunClient.StunTransport.IsStream.get -> bool
