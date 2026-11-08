@@ -1,14 +1,13 @@
 # Public API
 
-What the libraries of SharpICE expose is written down, and a change to it does not build until it
-is written down too. The libraries are SharpICE, SharpStunCommon, SharpStunClient, SharpStunServer,
+What the libraries of SharpICE expose is written down, and a removal from it does not build until it is written down too, an addition warns until it is. The libraries are SharpICE, SharpStunCommon, SharpStunClient, SharpStunServer,
 SharpTurnCommon, SharpTurnClient and SharpTurnServer, and two checks run on every `dotnet build` of
 each:
 
 - **The API files.** `PublicAPI.Shipped.txt` and `PublicAPI.Unshipped.txt` next to each project list
   its public types and members. They are the same on all four target frameworks. Shipped is the API
-  as released; Unshipped is what changed since. A public symbol missing from them fails the build
-  with RS0016, a listed one that is gone with RS0017.
+  as released; Unshipped is what changed since. A public symbol missing from them is a warning, RS0016, until it is
+  listed - an addition breaks no one - and a listed one that is gone fails the build with RS0017.
 - **Package validation.** Each package being built is checked for its target frameworks agreeing
   with one another: what netstandard2.0 offers, net481, net8.0 and net10.0 have to offer too. Once a
   library has a release, it is compared with that release as well, and every binary or source
@@ -16,7 +15,7 @@ each:
 
 ## Adding to the API
 
-Build, and accept the RS0016 fix in the IDE ("Add to public API"), or from the command line:
+List what the RS0016 warnings name: accept their fix in the IDE ("Add to public API"), or from the command line:
 
 ```
 dotnet format analyzers src/SharpStunClient/SharpStunClient.csproj --diagnostics RS0016 --severity warn
