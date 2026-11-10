@@ -123,7 +123,8 @@ namespace SharpICE
             public IceCandidate Candidate;
             public byte[] Buffer;
 
-            public bool IsTcp => Candidate.IsTcp;
+            // of TCP, or of TLS over it: of connections
+            public bool IsStream => Candidate.IsStream;
         }
 
         // a STUN message to send: over a connection of TCP, or of the base's socket to an address
@@ -478,6 +479,8 @@ namespace SharpICE
 
             if (_options.IncludeTcp && !_options.RelayOnly)
                 GatherTcp(addresses, gathered);
+            if (_options.IncludeTls && !_options.RelayOnly)
+                GatherTls(addresses, gathered);
             if (!_options.RelayOnly)
                 GatherPublic(gathered);
 
@@ -529,7 +532,7 @@ namespace SharpICE
                     // of the family's bases; of an address that is the base's own, no NAT: nothing to tell of
                     if (local.EndPoint.AddressFamily != address.AddressFamily || local.EndPoint.Address.Equals(address))
                         continue;
-                    bool tcp = local.Listener != null;
+                    bool stream = local.Listener != null;
                     string text = address.ToString();
                     lock (_sync)
                     {
@@ -543,7 +546,7 @@ namespace SharpICE
                         Foundation = "p" + (++index).ToString(CultureInfo.InvariantCulture),
                         Component = IceCandidate.RtpComponent,
                         Transport = local.Candidate.Transport,
-                        Priority = IceCandidate.ComputePriority(type, preference, IceCandidate.RtpComponent, tcp),
+                        Priority = IceCandidate.ComputePriority(type, preference, IceCandidate.RtpComponent, local.Candidate.Transport),
                         Address = text,
                         Port = local.EndPoint.Port,
                         Type = type,
@@ -554,7 +557,7 @@ namespace SharpICE
                         candidate.RelatedAddress = _mdns != null ? NoAddress(address.AddressFamily) : local.EndPoint.Address.ToString();
                         candidate.RelatedPort = _mdns != null ? 0 : local.EndPoint.Port;
                     }
-                    if (tcp)
+                    if (stream)
                         candidate.TcpType = IceCandidate.TcpPassive;
                     lock (_sync)
                         _localCandidates.Add(candidate);
@@ -800,10 +803,10 @@ namespace SharpICE
         {
             if (candidate == null || candidate.Component != IceCandidate.RtpComponent)
                 return false;
-            if (!candidate.IsUdp && !(candidate.IsTcp && _options.IncludeTcp))
+            if (!candidate.IsUdp && !(candidate.IsTcp && _options.IncludeTcp) && !(candidate.IsTls && _options.IncludeTls))
                 return false;
-            // of TCP, active and passive ones; simultaneous-open is not done
-            if (candidate.IsTcp && candidate.TcpType != IceCandidate.TcpActive && candidate.TcpType != IceCandidate.TcpPassive)
+            // of TCP and TLS, active and passive ones; simultaneous-open is not done
+            if (candidate.IsStream && candidate.TcpType != IceCandidate.TcpActive && candidate.TcpType != IceCandidate.TcpPassive)
                 return false;
             if (candidate.Port < 0 || candidate.Port > IPEndPoint.MaxPort)
                 return false;
@@ -914,7 +917,7 @@ namespace SharpICE
             {
                 if (_closed)
                     return false;
-                var existing = _remoteCandidates.FirstOrDefault(c => c.IsTcp == candidate.IsTcp && Equals(c.EndPoint, endPoint));
+                var existing = _remoteCandidates.FirstOrDefault(c => IceCandidate.SameTransport(c, candidate) && Equals(c.EndPoint, endPoint));
                 if (existing != null)
                 {
                     // a peer reflexive one learnt of the peer's checks before it was signalled - of an mDNS name resolved after
@@ -948,11 +951,11 @@ namespace SharpICE
             // a loopback address reaches only one of its own, and one of a network only one of a network
             if (IPAddress.IsLoopback(endPoint.Address) != IPAddress.IsLoopback(local.EndPoint.Address))
                 return null;
-            if (local.IsTcp != remote.IsTcp)
+            if (!IceCandidate.SameTransport(local.Candidate, remote))
                 return null;
-            // of TCP, an active candidate of the peer's passive ones; a passive one's pairs are of the connections the peer
-            // makes to it, as its checks come over them (RFC 6544 6.2)
-            if (local.IsTcp && (local.Candidate.TcpType != IceCandidate.TcpActive || remote.TcpType != IceCandidate.TcpPassive))
+            // of TCP and TLS, an active candidate of the peer's passive ones; a passive one's pairs are of the connections the
+            // peer makes to it, as its checks come over them (RFC 6544 6.2)
+            if (local.IsStream && (local.Candidate.TcpType != IceCandidate.TcpActive || remote.TcpType != IceCandidate.TcpPassive))
                 return null;
 
             var existing = _pairs.FirstOrDefault(p => p.Base == local && p.RemoteEndPoint.Equals(endPoint));
@@ -1067,8 +1070,8 @@ namespace SharpICE
                         {
                             if (pair.State != IceCandidatePairState.InProgress || now < pair.NextTransmission)
                                 continue;
-                            // over TCP, no retransmissions (RFC 6544 7.1): given up as late as one of UDP is
-                            if (pair.IsTcp || pair.Transmissions >= _options.MaxTransmissions)
+                            // over TCP and TLS, no retransmissions (RFC 6544 7.1): given up as late as one of UDP is
+                            if (pair.IsStream || pair.Transmissions >= _options.MaxTransmissions)
                             {
                                 _transactions.Remove(Key(pair.TransactionId));
                                 pair.State = pair.LastSucceeded > DateTime.MinValue ? IceCandidatePairState.Succeeded : IceCandidatePairState.Failed;
@@ -1159,15 +1162,15 @@ namespace SharpICE
                 .OrderByDescending(p => p.Priority).FirstOrDefault();
         }
 
-        // of TCP, a pair of the agent's active candidate, or one of a connection there is
+        // of TCP and TLS, a pair of the agent's active candidate, or one of a connection there is
         private static bool IsCheckable(IceCandidatePair pair)
-            => !pair.IsTcp || pair.Connection != null || pair.Local.TcpType == IceCandidate.TcpActive;
+            => !pair.IsStream || pair.Connection != null || pair.Local.TcpType == IceCandidate.TcpActive;
 
-        // under the lock: the check begun, sent at once, or of TCP, once its connection is made
+        // under the lock: the check begun, sent at once, or of TCP and TLS, once its connection is made
         private void Check(IceCandidatePair pair, DateTime now, List<Outgoing> sends, List<IceCandidatePair> connects)
         {
             byte[] bytes = BeginCheck(pair, now);
-            if (pair.IsTcp && pair.Connection == null)
+            if (pair.IsStream && pair.Connection == null)
                 connects.Add(pair);
             else
                 sends.Add(new Outgoing(pair.Base, pair.Connection, bytes, pair.RemoteEndPoint));
@@ -1182,7 +1185,7 @@ namespace SharpICE
             var request = new StunMessage(StunMethod.Binding, StunMessageClass.Request);
             request.AddString(StunAttributeType.Username, RemoteUfrag + ":" + LocalUfrag);
             // the priority of the peer reflexive candidate the check may make of the pair's local one (RFC 8445 7.1.1)
-            request.AddUInt32(StunAttributeType.Priority, IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, pair.Local.LocalPreference, IceCandidate.RtpComponent, pair.IsTcp));
+            request.AddUInt32(StunAttributeType.Priority, IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, pair.Local.LocalPreference, IceCandidate.RtpComponent, pair.Local.Transport));
             if (Role == IceRole.Controlling)
             {
                 request.AddUInt64(StunAttributeType.IceControlling, TieBreaker);
@@ -1204,8 +1207,8 @@ namespace SharpICE
             pair.Transmissions = 1;
             pair.Timeout = _options.InitialRetransmissionTimeout;
             pair.CheckStarted = now;
-            // of TCP, the whole of the time UDP's retransmissions would take, at once
-            pair.NextTransmission = now + (pair.IsTcp
+            // of TCP and TLS, the whole of the time UDP's retransmissions would take, at once
+            pair.NextTransmission = now + (pair.IsStream
                 ? TimeSpan.FromTicks(_options.InitialRetransmissionTimeout.Ticks * ((1L << _options.MaxTransmissions) - 1))
                 : pair.Timeout);
             // of a pair that worked too - its consent, or its nomination - which goes back to it if no answer comes
@@ -1380,18 +1383,19 @@ namespace SharpICE
                     }
                 }
 
-                // a candidate the peer did not signal - a peer reflexive one (RFC 8445 7.3.1.3); over TCP, the active one of
-                // the connection it made
+                // a candidate the peer did not signal - a peer reflexive one (RFC 8445 7.3.1.3); over TCP or TLS, the active
+                // one of the connection it made, of the transport of the candidate it connected to
                 bool tcp = connection != null;
-                var remote = _remoteCandidates.FirstOrDefault(c => c.IsTcp == tcp && Equals(c.EndPoint, from));
+                string transport = tcp ? (local.Candidate.IsTls ? "tls" : "tcp") : "udp";
+                var remote = _remoteCandidates.FirstOrDefault(c => (tcp ? IceCandidate.SameTransport(c, local.Candidate) : c.IsUdp) && Equals(c.EndPoint, from));
                 if (remote == null)
                 {
                     remote = new IceCandidate
                     {
                         Foundation = "p" + (_remoteCandidates.Count + 1).ToString(CultureInfo.InvariantCulture),
                         Component = IceCandidate.RtpComponent,
-                        Transport = tcp ? "tcp" : "udp",
-                        Priority = request.Priority ?? IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, 0, IceCandidate.RtpComponent, tcp),
+                        Transport = transport,
+                        Priority = request.Priority ?? IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, 0, IceCandidate.RtpComponent, transport),
                         Address = from.Address.ToString(),
                         Port = from.Port,
                         Type = IceCandidateType.PeerReflexive,
@@ -1615,7 +1619,7 @@ namespace SharpICE
             var pair = SelectedPair;
             if (pair == null || _closed || State == IceConnectionState.Failed)
                 return false;
-            if (pair.IsTcp)
+            if (pair.IsStream)
                 return pair.Connection?.Send(buffer, offset, count) == true;
             if (pair.Base.Turn != null)
             {
@@ -1719,6 +1723,7 @@ namespace SharpICE
             }
             foreach (var connection in connections)
                 connection.Dispose();
+            _tlsServer?.Dispose();
             // the allocations deleted, a second each at most
             foreach (var turn in turns)
                 turn.Dispose();

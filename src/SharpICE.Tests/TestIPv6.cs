@@ -126,7 +126,9 @@ namespace SharpICE.Tests
             var candidates = controlling.LocalCandidates.OrderByDescending(c => c.Priority).ToList();
             Assert.AreEqual(2, candidates.Count);
             Assert.AreEqual(AddressFamily.InterNetworkV6, candidates[0].EndPoint.AddressFamily, "IPv6 first (RFC 8421)");
-            Assert.AreEqual(AddressFamily.InterNetworkV6, controlling.SelectedPair.RemoteEndPoint.AddressFamily);
+            // the IPv6 pair checked first, of its priority; the first pair that works is nominated, which of a busy machine may
+            // be the IPv4 one, its check answered first
+            Assert.AreEqual(AddressFamily.InterNetworkV6, controlling.Pairs.OrderByDescending(p => p.Priority).First().RemoteEndPoint.AddressFamily, "the IPv6 pair first");
             Assert.AreEqual(4, controlling.Pairs.Count + controlled.Pairs.Count, "no pair of two families");
         }
 

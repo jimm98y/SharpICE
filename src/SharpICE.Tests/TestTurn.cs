@@ -222,9 +222,12 @@ namespace SharpICE.Tests
             using var client = new TurnClient(ClientOptions());
             await client.ConnectAsync("turn:127.0.0.1:" + udp.Port);
 
-            // of TCP to the peers, 442; of no REQUESTED-TRANSPORT, 400
+            // of TCP to the peers over UDP to the server, 400 (RFC 6062 5.1); of a transport of neither, 442; of no
+            // REQUESTED-TRANSPORT, 400
             var tcp = new StunMessage(TurnMethod.Allocate, StunMessageClass.Request).AddAttribute(TurnAttributeType.RequestedTransport, new byte[] { 6, 0, 0, 0 });
-            Assert.AreEqual(TurnErrorCode.UnsupportedTransportProtocol, (await client.Client.RequestAsync(tcp)).Error.Value.Code);
+            Assert.AreEqual(StunErrorCode.BadRequest, (await client.Client.RequestAsync(tcp)).Error.Value.Code);
+            var sctp = new StunMessage(TurnMethod.Allocate, StunMessageClass.Request).AddAttribute(TurnAttributeType.RequestedTransport, new byte[] { 132, 0, 0, 0 });
+            Assert.AreEqual(TurnErrorCode.UnsupportedTransportProtocol, (await client.Client.RequestAsync(sctp)).Error.Value.Code);
             var none = new StunMessage(TurnMethod.Allocate, StunMessageClass.Request);
             Assert.AreEqual(StunErrorCode.BadRequest, (await client.Client.RequestAsync(none)).Error.Value.Code);
 

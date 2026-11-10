@@ -26,6 +26,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -55,6 +56,58 @@ namespace SharpTurnClient
 
         /// <summary>The token of a port reserved before, to allocate.</summary>
         public byte[] ReservationToken { get; set; }
+
+        /// <summary>
+        /// A TCP allocation (RFC 6062): a relayed address of TCP, of connections to and of peers - of
+        /// <see cref="TurnClient.ConnectPeerAsync"/> and <see cref="TurnClient.AcceptPeerAsync"/> - rather than of datagrams.
+        /// Of a client of TCP or TLS to the server alone, of none of <see cref="Dual"/>, <see cref="DontFragment"/>,
+        /// <see cref="EvenPort"/>, <see cref="ReserveNextPort"/> or <see cref="ReservationToken"/>.
+        /// </summary>
+        public bool Tcp { get; set; }
+    }
+
+    /// <summary>A peer that connected to the relayed address of a TCP allocation (RFC 6062 4.4): to accept, or leave.</summary>
+    public sealed class TurnConnectionAttemptEventArgs : EventArgs
+    {
+        public TurnConnectionAttemptEventArgs(IPEndPoint peer, uint connectionId)
+        {
+            Peer = peer;
+            ConnectionId = connectionId;
+        }
+
+        public IPEndPoint Peer { get; }
+
+        /// <summary>The server's number of the peer's connection: of <see cref="TurnClient.AcceptPeerAsync"/>, in 30 seconds.</summary>
+        public uint ConnectionId { get; }
+    }
+
+    /// <summary>
+    /// A connection to a peer through a TCP allocation (RFC 6062): a data connection of the client's to the server, bound to the
+    /// peer's connection to the relay, whose bytes go to the peer as they are, and the peer's to it. It ends as the peer's does.
+    /// </summary>
+    public sealed class TurnTcpConnection : IDisposable
+    {
+        private readonly StunStreamTransport _transport;
+
+        internal TurnTcpConnection(IPEndPoint peer, uint connectionId, Stream stream, StunStreamTransport transport)
+        {
+            Peer = peer;
+            ConnectionId = connectionId;
+            Stream = stream;
+            _transport = transport;
+        }
+
+        public IPEndPoint Peer { get; }
+        public uint ConnectionId { get; }
+
+        /// <summary>The bytes to and of the peer: of TLS of a client of TLS to the server.</summary>
+        public Stream Stream { get; }
+
+        /// <summary>The address of the data connection, of the client's.</summary>
+        public IPEndPoint LocalEndPoint => _transport.LocalEndPoint;
+
+        /// <summary>Closes the data connection, and the server the peer's of it (RFC 6062 4.6).</summary>
+        public void Dispose() => _transport.Dispose();
     }
 
     /// <summary>A TURN request the server refused: its error code and reason (RFC 8656 19).</summary>
@@ -227,6 +280,15 @@ namespace SharpTurnClient
             get { lock (_sync) return _allocated; }
         }
 
+        /// <summary>Of a TCP allocation (RFC 6062): its peers of connections, not of datagrams.</summary>
+        public bool IsTcp { get; private set; }
+
+        /// <summary>
+        /// Of a TCP allocation: a peer of a permission connected to the relayed address (RFC 6062 4.4) - of
+        /// <see cref="AcceptPeerAsync"/>, its connection the client's; else closed of the server in 30 seconds.
+        /// </summary>
+        public event EventHandler<TurnConnectionAttemptEventArgs> ConnectionAttempt;
+
         /// <summary>Data a peer sent: of a Data indication, or of ChannelData, of a peer of a permission.</summary>
         public event EventHandler<TurnDataEventArgs> DataReceived;
 
@@ -243,7 +305,15 @@ namespace SharpTurnClient
         public async Task AllocateAsync(TurnAllocateOptions options = null, CancellationToken cancellationToken = default)
         {
             options ??= new TurnAllocateOptions();
-            var request = new StunMessage(TurnMethod.Allocate, StunMessageClass.Request).AddRequestedTransport();
+            if (options.Tcp)
+            {
+                // of a control connection of TCP or TLS, of none of what a relay of UDP is of (RFC 6062 4.1)
+                if (!(_client.Transport is StunStreamTransport))
+                    throw new InvalidOperationException("A TCP allocation is of a client of TCP or TLS to the server (RFC 6062 4.1).");
+                if (options.Dual || options.DontFragment || options.EvenPort || options.ReserveNextPort || options.ReservationToken != null)
+                    throw new ArgumentException("A TCP allocation is of none of Dual, DontFragment, EvenPort, ReserveNextPort or ReservationToken (RFC 6062 4.1).", nameof(options));
+            }
+            var request = new StunMessage(TurnMethod.Allocate, StunMessageClass.Request).AddRequestedTransport(options.Tcp ? TurnConstants.Tcp : TurnConstants.Udp);
             if (options.AddressFamily.HasValue)
                 request.AddAddressFamily(TurnAttributeType.RequestedAddressFamily, options.AddressFamily.Value);
             if (options.Dual)
@@ -269,6 +339,7 @@ namespace SharpTurnClient
                 _relayed.AddRange(relayed);
                 _allocated = true;
             }
+            IsTcp = options.Tcp;
             MappedEndPoint = response.GetXorAddress();
             ReservationToken = response.GetAttribute(TurnAttributeType.ReservationToken)?.Value;
             var addressError = response.GetAddressError();
@@ -394,6 +465,8 @@ namespace SharpTurnClient
         /// </summary>
         public async Task<ushort> BindChannelAsync(IPEndPoint peer, CancellationToken cancellationToken = default)
         {
+            if (IsTcp)
+                throw new InvalidOperationException("A TCP allocation binds no channels: of ConnectPeerAsync, a connection to the peer (RFC 6062).");
             peer = Normalize(peer);
             ChannelState channel;
             lock (_sync)
@@ -502,6 +575,8 @@ namespace SharpTurnClient
         /// </summary>
         public async Task SendAsync(IPEndPoint peer, byte[] buffer, int offset, int count, bool dontFragment = false, CancellationToken cancellationToken = default)
         {
+            if (IsTcp)
+                throw new InvalidOperationException("A TCP allocation sends no datagrams: of ConnectPeerAsync, a connection to the peer (RFC 6062).");
             peer = Normalize(peer);
             if (TrySend(peer, buffer, offset, count))
                 return;
@@ -529,6 +604,11 @@ namespace SharpTurnClient
         private void OnIndication(object sender, StunMessageEventArgs e)
         {
             var message = e.Message;
+            if (message.Method == TurnMethod.ConnectionAttempt)
+            {
+                OnConnectionAttempt(message);
+                return;
+            }
             if (message.Method != TurnMethod.Data)
                 return;
             var peer = message.GetXorAddress(TurnAttributeType.XorPeerAddress);
@@ -561,6 +641,90 @@ namespace SharpTurnClient
         }
 
         #endregion // Data
+
+        #region TCP allocations
+
+        /// <summary>
+        /// Of a TCP allocation: a connection to the peer of the relayed address (RFC 6062 4.3) - a Connect, then a data connection
+        /// of the client's own to the server, of a ConnectionBind of the same credentials - whose stream is the peer's bytes.
+        /// </summary>
+        /// <exception cref="TurnException">Of an error response: of 446, a connection of the peer's there is already; of 447, it failed.</exception>
+        public async Task<TurnTcpConnection> ConnectPeerAsync(IPEndPoint peer, CancellationToken cancellationToken = default)
+        {
+            if (peer == null)
+                throw new ArgumentNullException(nameof(peer));
+            if (!IsTcp || !IsAllocated)
+                throw new InvalidOperationException("A connection to a peer is of a TCP allocation (RFC 6062): AllocateAsync of TurnAllocateOptions.Tcp first.");
+            peer = Normalize(peer);
+            var request = new StunMessage(TurnMethod.Connect, StunMessageClass.Request).AddXorAddress(peer, TurnAttributeType.XorPeerAddress);
+            AddSoftware(request);
+            var response = await RequestAsync(request, cancellationToken).ConfigureAwait(false);
+            uint? id = response.GetConnectionId();
+            if (id == null)
+                throw new TurnException(StunErrorCode.BadRequest, "The Connect response has no CONNECTION-ID.", response);
+            return await BindConnectionAsync(peer, id.Value, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Of a TCP allocation: the connection of a peer that connected to the relayed address, of its
+        /// <see cref="ConnectionAttempt"/> (RFC 6062 4.4) - a data connection of the client's own, of a ConnectionBind.
+        /// </summary>
+        /// <exception cref="TurnException">Of an error response: of 400, the server no longer has the peer's connection.</exception>
+        public Task<TurnTcpConnection> AcceptPeerAsync(TurnConnectionAttemptEventArgs attempt, CancellationToken cancellationToken = default)
+        {
+            if (attempt == null)
+                throw new ArgumentNullException(nameof(attempt));
+            if (!IsTcp || !IsAllocated)
+                throw new InvalidOperationException("A connection of a peer is of a TCP allocation (RFC 6062).");
+            return BindConnectionAsync(attempt.Peer, attempt.ConnectionId, cancellationToken);
+        }
+
+        // a new connection to the server of the control connection's - of its TLS, and its certificate's name - bound to the
+        // peer's of a ConnectionBind of the client's credentials; past its success response, the peer's bytes (RFC 6062 4.3)
+        private async Task<TurnTcpConnection> BindConnectionAsync(IPEndPoint peer, uint connectionId, CancellationToken cancellationToken)
+        {
+            var control = _client.Transport ?? throw new InvalidOperationException("The client is not connected.");
+            var transport = await StunStreamTransport.ConnectAsync(control.RemoteEndPoint, _client.TlsHost, _client.Options.CertificateValidation, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                // nothing of the connection read as STUN past its ConnectionBind's success
+                transport.DetachAfter = message => message.Method == TurnMethod.ConnectionBind && message.Class == StunMessageClass.SuccessResponse;
+                using (var bind = new StunClient(transport, _client.Options))
+                {
+                    var request = new StunMessage(TurnMethod.ConnectionBind, StunMessageClass.Request).AddConnectionId(connectionId);
+                    AddSoftware(request);
+                    var response = await bind.RequestAsync(request, cancellationToken).ConfigureAwait(false);
+                    if (response == null)
+                        throw new TurnException(408, "Request Timeout");
+                    if (response.Class == StunMessageClass.ErrorResponse)
+                    {
+                        var error = response.Error;
+                        throw new TurnException(error?.Code ?? 0, error?.Reason ?? "", response);
+                    }
+                }
+                var stream = await transport.DetachedAsync().ConfigureAwait(false);
+                return new TurnTcpConnection(peer, connectionId, stream, transport);
+            }
+            catch
+            {
+                transport.Dispose();
+                throw;
+            }
+        }
+
+        // a ConnectionAttempt (RFC 6062 4.4): of the server alone, as of the control connection of TCP or TLS
+        private void OnConnectionAttempt(StunMessage message)
+        {
+            if (!IsTcp)
+                return;
+            var peer = message.GetXorAddress(TurnAttributeType.XorPeerAddress);
+            uint? id = message.GetConnectionId();
+            if (peer == null || id == null)
+                return;
+            ConnectionAttempt?.Invoke(this, new TurnConnectionAttemptEventArgs(Normalize(peer), id.Value));
+        }
+
+        #endregion // TCP allocations
 
         #region Maintenance
 

@@ -24,6 +24,8 @@ using ReadTask = System.Threading.Tasks.ValueTask<bool>;
 #else
 using ReadTask = System.Threading.Tasks.Task<bool>;
 #endif
+using SharpDTLS;
+using SharpStunCommon;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -32,6 +34,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SharpICE
@@ -39,7 +42,8 @@ namespace SharpICE
     /// <summary>
     /// ICE over TCP (RFC 6544): of each local address, a passive candidate - a listener whose connections the peer's checks
     /// come over - and an active one, of port 9, which connects to the peer's passive ones; the checks and the data framed as
-    /// RFC 4571 frames RTP, of a 16 bit length each. Simultaneous-open is not done.
+    /// RFC 4571 frames RTP, of a 16 bit length each. Simultaneous-open is not done. Of ICE-TCP over TLS, alike, each
+    /// connection of TLS of SharpDTLS: the agent of the active candidate its client, of the passive one its server.
     /// </summary>
     public sealed partial class IceAgent
     {
@@ -48,8 +52,40 @@ namespace SharpICE
         // the discard port, which an active candidate says it is of (RFC 6544 4.5)
         private const int ActivePort = 9;
 
-        private void GatherTcp(List<IPAddress> addresses, List<IceCandidate> gathered)
+        // of TLS: the server the passive candidates' connections are answered of, of the agent's certificate
+        private TlsServer _tlsServer;
+
+        // of TLS: the connections to passive candidates whose handshakes are under way, of the connections' limit too
+        private int _tlsHandshakes;
+
+        private void GatherTcp(List<IPAddress> addresses, List<IceCandidate> gathered) => GatherStream(addresses, gathered, false);
+
+        // of ICE-TCP over TLS, as of TCP: the candidates of transport "tls", their connections of TLS
+        private void GatherTls(List<IPAddress> addresses, List<IceCandidate> gathered)
         {
+            if (_tlsServer == null)
+            {
+                // of the certificate given, else of one of the agent's own, of ECDSA
+                var credentials = _options.TlsCertificate != null
+                    ? DtlsCertificates.Load(_options.TlsCertificate)
+                    : DtlsCertificates.CreateSelfSigned("SharpICE");
+                var server = new TlsServer(credentials.KeyPair, credentials.Certificate) { IntermediateCertificates = credentials.Intermediates };
+                lock (_sync)
+                {
+                    if (_closed)
+                    {
+                        server.Dispose();
+                        return;
+                    }
+                    _tlsServer = server;
+                }
+            }
+            GatherStream(addresses, gathered, true);
+        }
+
+        private void GatherStream(List<IPAddress> addresses, List<IceCandidate> gathered, bool tls)
+        {
+            string transport = tls ? "tls" : "tcp";
             for (int i = 0; i < addresses.Count; i++)
             {
                 var address = addresses[i];
@@ -64,15 +100,16 @@ namespace SharpICE
                     continue;
                 }
 
-                // one foundation of the address, of TCP: its passive and active candidates are of one base address and type
+                // one foundation of the address, of TCP or of TLS: its passive and active candidates are of one base address,
+                // type and transport
                 var endPoint = (IPEndPoint)listener.LocalEndpoint;
-                string foundation = "t" + (i + 1).ToString(CultureInfo.InvariantCulture);
+                string foundation = (tls ? "l" : "t") + (i + 1).ToString(CultureInfo.InvariantCulture);
                 var passive = new IceCandidate
                 {
                     Foundation = foundation,
                     Component = IceCandidate.RtpComponent,
-                    Transport = "tcp",
-                    Priority = IceCandidate.ComputePriority(IceCandidateType.Host, IceCandidate.TcpLocalPreference(IceCandidate.TcpPassive, 8191 - i), IceCandidate.RtpComponent, true),
+                    Transport = transport,
+                    Priority = IceCandidate.ComputePriority(IceCandidateType.Host, IceCandidate.TcpLocalPreference(IceCandidate.TcpPassive, 8191 - i), IceCandidate.RtpComponent, transport),
                     Address = HostAddress(endPoint.Address),
                     Port = endPoint.Port,
                     Type = IceCandidateType.Host,
@@ -82,8 +119,8 @@ namespace SharpICE
                 {
                     Foundation = foundation,
                     Component = IceCandidate.RtpComponent,
-                    Transport = "tcp",
-                    Priority = IceCandidate.ComputePriority(IceCandidateType.Host, IceCandidate.TcpLocalPreference(IceCandidate.TcpActive, 8191 - i), IceCandidate.RtpComponent, true),
+                    Transport = transport,
+                    Priority = IceCandidate.ComputePriority(IceCandidateType.Host, IceCandidate.TcpLocalPreference(IceCandidate.TcpActive, 8191 - i), IceCandidate.RtpComponent, transport),
                     Address = HostAddress(endPoint.Address),
                     Port = ActivePort,
                     Type = IceCandidateType.Host,
@@ -142,6 +179,28 @@ namespace SharpICE
                     continue;
                 }
 
+                if (local.Candidate.IsTls)
+                {
+                    // of TLS, its handshake of a task of its own, that a peer slow of it holds up no other
+                    lock (_sync)
+                    {
+                        if (_closed)
+                        {
+                            client.Dispose();
+                            return;
+                        }
+                        if (_connections.Count + _tlsHandshakes >= _options.MaxTcpConnections)
+                        {
+                            Trace($"Connection from {client.Client.RemoteEndPoint} refused: {_options.MaxTcpConnections} already");
+                            client.Dispose();
+                            continue;
+                        }
+                        _tlsHandshakes++;
+                    }
+                    _ = AcceptTlsAsync(local, client);
+                    continue;
+                }
+
                 var connection = new IceTcpConnection(client);
                 lock (_sync)
                 {
@@ -150,7 +209,7 @@ namespace SharpICE
                         connection.Dispose();
                         return;
                     }
-                    if (_connections.Count >= _options.MaxTcpConnections)
+                    if (_connections.Count + _tlsHandshakes >= _options.MaxTcpConnections)
                     {
                         Trace($"Connection from {connection.RemoteEndPoint} refused: {_options.MaxTcpConnections} already");
                         connection.Dispose();
@@ -158,9 +217,66 @@ namespace SharpICE
                     }
                     _connections.Add(connection);
                 }
-                Trace($"Connection from {connection.RemoteEndPoint} to {local.EndPoint}");
-                StartReceiving(local, connection);
-                _ = CloseUnpairedAsync(connection);
+                Accepted(local, connection);
+            }
+        }
+
+        private void Accepted(LocalBase local, IceTcpConnection connection)
+        {
+            Trace($"Connection from {connection.RemoteEndPoint} to {local.EndPoint}");
+            StartReceiving(local, connection);
+            _ = CloseUnpairedAsync(connection);
+        }
+
+        // a connection to a passive candidate of TLS: its handshake, of the agent's server, done in the time a connection has
+        // to make a pair of its checks - else closed, as anyone may connect
+        private async Task AcceptTlsAsync(LocalBase local, TcpClient client)
+        {
+            IceTcpConnection connection = null;
+            try
+            {
+                using (var timeout = new CancellationTokenSource(_options.TcpCheckTimeout))
+                {
+                    var stream = await TlsStream.AcceptAsync(_tlsServer, client.GetStream(), timeout.Token).ConfigureAwait(false);
+                    connection = new IceTcpConnection(client, stream);
+                }
+            }
+            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is OperationCanceledException || ex is InvalidOperationException || ex is DtlsException)
+            {
+                Trace($"TLS of {SafeRemote(client)} failed: {ex.Message}");
+            }
+
+            lock (_sync)
+            {
+                _tlsHandshakes--;
+                if (connection != null && !_closed)
+                {
+                    _connections.Add(connection);
+                }
+                else
+                {
+                    connection?.Dispose();
+                    connection = null;
+                }
+            }
+            if (connection == null)
+            {
+                client.Dispose();
+                return;
+            }
+            Accepted(local, connection);
+        }
+
+        // of a connection that may be gone already: its peer's address, or nothing
+        private static string SafeRemote(TcpClient client)
+        {
+            try
+            {
+                return client.Client.RemoteEndPoint?.ToString();
+            }
+            catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
+            {
+                return null;
             }
         }
 
@@ -182,15 +298,28 @@ namespace SharpICE
         private async Task ConnectAsync(IceCandidatePair pair)
         {
             var client = new TcpClient(pair.RemoteEndPoint.AddressFamily);
+            TlsStream tls = null;
             try
             {
+                var deadline = DateTime.UtcNow + TcpConnectTimeout;
                 client.Client.Bind(new IPEndPoint(pair.Base.EndPoint.Address, 0));
                 var connect = client.ConnectAsync(pair.RemoteEndPoint.Address, pair.RemoteEndPoint.Port);
                 if (await Task.WhenAny(connect, Task.Delay(TcpConnectTimeout)).ConfigureAwait(false) != connect)
                     throw new SocketException((int)SocketError.TimedOut);
                 await connect.ConfigureAwait(false);
+
+                if (pair.IsTls)
+                {
+                    // of TLS, the agent the client, its handshake of the time left of the connection's: the peer's certificate
+                    // taken as it is, as nothing signalled tells of it (see IceAgentOptions.IncludeTls)
+                    var left = deadline - DateTime.UtcNow;
+                    using (var timeout = new CancellationTokenSource(left > TimeSpan.Zero ? left : TimeSpan.FromMilliseconds(1)))
+                    {
+                        tls = await TlsStream.ConnectAsync(client.GetStream(), c => c.ServerCertificateValidator = (leaf, chain) => true, timeout.Token).ConfigureAwait(false);
+                    }
+                }
             }
-            catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
+            catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException || ex is IOException || ex is OperationCanceledException || ex is InvalidOperationException || ex is DtlsException)
             {
                 client.Dispose();
                 lock (_sync)
@@ -205,7 +334,7 @@ namespace SharpICE
                 return;
             }
 
-            var connection = new IceTcpConnection(client);
+            var connection = new IceTcpConnection(client, tls);
             byte[] request;
             lock (_sync)
             {
@@ -258,20 +387,25 @@ namespace SharpICE
         }
     }
 
-    /// <summary>A connection of ICE over TCP: its packets - STUN, DTLS, RTP, RTCP - each of a 16 bit length before it (RFC 4571).</summary>
+    /// <summary>
+    /// A connection of ICE over TCP, or of TLS over it: its packets - STUN, DTLS, RTP, RTCP - each of a 16 bit length before it
+    /// (RFC 4571), of TLS in its records.
+    /// </summary>
     internal sealed class IceTcpConnection : IDisposable
     {
         private readonly TcpClient _client;
-        private readonly NetworkStream _stream;
+        private readonly Stream _stream;
         private readonly object _writing = new object();
 
-        public IceTcpConnection(TcpClient client)
+        /// <summary>The connection, of its own stream, or of the TLS of it given.</summary>
+        public IceTcpConnection(TcpClient client, Stream tls = null)
         {
             _client = client;
             _client.NoDelay = true;
             // a write to a peer that reads nothing ends, rather than holding the thread it blocks
             _client.SendTimeout = 5000;
-            _stream = client.GetStream();
+            _stream = tls ?? client.GetStream();
+            IsTls = tls != null;
             LocalEndPoint = IceAgent.Normalize((IPEndPoint)client.Client.LocalEndPoint);
             RemoteEndPoint = IceAgent.Normalize((IPEndPoint)client.Client.RemoteEndPoint);
         }
@@ -279,6 +413,8 @@ namespace SharpICE
         public IPEndPoint LocalEndPoint { get; }
 
         public IPEndPoint RemoteEndPoint { get; }
+
+        public bool IsTls { get; }
 
         // of its one receiving loop: told of again of each packet
         public readonly IceDataReceivedEventArgs Args = new IceDataReceivedEventArgs();

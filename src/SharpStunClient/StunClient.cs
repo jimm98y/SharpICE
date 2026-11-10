@@ -157,6 +157,9 @@ namespace SharpStunClient
 
         public bool IsConnected => _transport != null;
 
+        /// <summary>Of TLS, the name the server's certificate was checked of: of TURN, its data connections' too (RFC 6062 4.3).</summary>
+        internal string TlsHost => _tlsHost;
+
         private StunTransport Connected => _transport ?? throw new InvalidOperationException("The client is not connected.");
 
         public StunClientOptions Options => _options;

@@ -38,6 +38,15 @@ namespace SharpTurnCommon
         public const ushort Data = 0x007;
         public const ushort CreatePermission = 0x008;
         public const ushort ChannelBind = 0x009;
+
+        /// <summary>Of a TCP allocation (RFC 6062 6.1): a connection to a peer the server is to make.</summary>
+        public const ushort Connect = 0x00A;
+
+        /// <summary>Of a TCP allocation (RFC 6062 6.1): a new connection of the client's bound to a peer's, of its CONNECTION-ID.</summary>
+        public const ushort ConnectionBind = 0x00B;
+
+        /// <summary>Of a TCP allocation (RFC 6062 6.1): an indication of a peer that connected to the relayed address.</summary>
+        public const ushort ConnectionAttempt = 0x00C;
     }
 
     /// <summary>TURN's attributes (RFC 8656 18).</summary>
@@ -53,6 +62,10 @@ namespace SharpTurnCommon
         public const ushort RequestedTransport = 0x0019;
         public const ushort DontFragment = 0x001A;
         public const ushort ReservationToken = 0x0022;
+
+        /// <summary>Of a TCP allocation (RFC 6062 6.2.1): the 32 bit number of a peer's connection.</summary>
+        public const ushort ConnectionId = 0x002A;
+
         public const ushort AdditionalAddressFamily = 0x8000;
         public const ushort AddressErrorCode = 0x8001;
         public const ushort Icmp = 0x8004;
@@ -60,7 +73,7 @@ namespace SharpTurnCommon
         private static readonly HashSet<ushort> Known = new HashSet<ushort>
         {
             ChannelNumber, Lifetime, XorPeerAddress, Data, XorRelayedAddress, RequestedAddressFamily, EvenPort, RequestedTransport,
-            DontFragment, ReservationToken, AdditionalAddressFamily, AddressErrorCode, Icmp,
+            DontFragment, ReservationToken, ConnectionId, AdditionalAddressFamily, AddressErrorCode, Icmp,
         };
 
         /// <summary>Whether the attribute is one of TURN's.</summary>
@@ -79,6 +92,13 @@ namespace SharpTurnCommon
         public const int WrongCredentials = 441;
         public const int UnsupportedTransportProtocol = 442;
         public const int PeerAddressFamilyMismatch = 443;
+
+        /// <summary>Of a Connect to a peer a connection is of, or being made to, already (RFC 6062 6.3).</summary>
+        public const int ConnectionAlreadyExists = 446;
+
+        /// <summary>Of a Connect whose connection to the peer failed, or timed out (RFC 6062 6.3).</summary>
+        public const int ConnectionTimeoutOrFailure = 447;
+
         public const int AllocationQuotaReached = 486;
         public const int InsufficientCapacity = 508;
     }
@@ -88,6 +108,16 @@ namespace SharpTurnCommon
     {
         /// <summary>The REQUESTED-TRANSPORT of UDP, the only one of RFC 8656 (18.8): its protocol number.</summary>
         public const byte Udp = 17;
+
+        /// <summary>The REQUESTED-TRANSPORT of TCP, of a TCP allocation (RFC 6062 4.1): its protocol number.</summary>
+        public const byte Tcp = 6;
+
+        /// <summary>
+        /// Of a TCP allocation (RFC 6062 5.2, 5.3): how long a peer's connection waits for its ConnectionBind, and how long the
+        /// server tries a Connect's connection at least.
+        /// </summary>
+        public static readonly TimeSpan ConnectionBindTimeout = TimeSpan.FromSeconds(30);
+        public static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(30);
 
         /// <summary>The channel numbers (RFC 8656 12).</summary>
         public const ushort MinChannel = 0x4000;
@@ -114,6 +144,17 @@ namespace SharpTurnCommon
         {
             var attribute = message.GetAttribute(TurnAttributeType.RequestedTransport);
             return attribute == null || attribute.Value.Length != 4 ? (byte?)null : attribute.Value[0];
+        }
+
+        /// <summary>CONNECTION-ID (RFC 6062 6.2.1): the number of a peer's connection.</summary>
+        public static StunMessage AddConnectionId(this StunMessage message, uint connectionId)
+            => message.AddUInt32(TurnAttributeType.ConnectionId, connectionId);
+
+        /// <summary>The number of a CONNECTION-ID; null of none, or of one not well formed.</summary>
+        public static uint? GetConnectionId(this StunMessage message)
+        {
+            var attribute = message.GetAttribute(TurnAttributeType.ConnectionId);
+            return attribute == null || attribute.Value.Length != 4 ? (uint?)null : BinaryPrimitives.ReadUInt32BigEndian(attribute.Value);
         }
 
         /// <summary>REQUESTED-ADDRESS-FAMILY or ADDITIONAL-ADDRESS-FAMILY (18.6, 18.11): 0x01 of IPv4, 0x02 of IPv6.</summary>

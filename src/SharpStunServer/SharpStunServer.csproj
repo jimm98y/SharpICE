@@ -8,6 +8,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- of TURN: a request answered later, and a connection taken over (RFC 6062) -->
+    <InternalsVisibleTo Include="SharpTurnServer" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\SharpStunCommon\SharpStunCommon.csproj" />
   </ItemGroup>
 

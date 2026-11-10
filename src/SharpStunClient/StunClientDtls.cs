@@ -19,53 +19,42 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-using Org.BouncyCastle.Asn1.X509;
-using Org.BouncyCastle.Crypto;
-using Org.BouncyCastle.Pkcs;
-using Org.BouncyCastle.Security;
-using Org.BouncyCastle.Tls;
-using Org.BouncyCastle.Tls.Crypto;
-using Org.BouncyCastle.Tls.Crypto.Impl.BC;
+using SharpDTLS;
+using SharpDTLS.UDP;
 using SharpStunCommon;
 using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
-using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace SharpStunClient
 {
     /// <summary>
-    /// STUN over DTLS (RFC 8489 6.2.3): a STUN message in each record of a DTLS 1.2 association of the server's, its certificate
-    /// checked as one of TLS is - of the host name given, of the system's checks or of a callback's. Requests over it are
-    /// retransmitted, as over UDP.
+    /// STUN over DTLS (RFC 8489 6.2.3): a STUN message in each record of a DTLS 1.3 or 1.2 association of the server's, of
+    /// SharpDTLS, its certificate checked as one of TLS is - of the host name given, of the system's checks or of a callback's.
+    /// Requests over it are retransmitted, as over UDP.
     /// </summary>
     public sealed class StunDtlsTransport : StunTransport
     {
-        private static readonly int HandshakeTimeout = 10000;
-
         private readonly Socket _socket;
-        private readonly DtlsTransport _dtls;
+        private readonly SocketClientTransport _datagrams;
+        private readonly DtlsClient _dtls;
         private readonly string _host;
         private readonly RemoteCertificateValidationCallback _validation;
-        private readonly Thread _receiver;
+        private readonly object _writing = new object();
         private volatile bool _closed;
 
-        private StunDtlsTransport(Socket socket, DtlsTransport dtls, IPEndPoint server, string host, RemoteCertificateValidationCallback validation)
+        private StunDtlsTransport(Socket socket, SocketClientTransport datagrams, DtlsClient dtls, IPEndPoint server, string host, RemoteCertificateValidationCallback validation)
         {
             _socket = socket;
+            _datagrams = datagrams;
             _dtls = dtls;
             _host = host;
             _validation = validation;
             RemoteEndPoint = server;
-            _receiver = new Thread(Receive) { IsBackground = true, Name = "STUN over DTLS" };
-            _receiver.Start();
         }
 
         /// <summary>
@@ -78,28 +67,84 @@ namespace SharpStunClient
             if (host == null)
                 throw new ArgumentNullException(nameof(host));
             var socket = new Socket(server.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            SocketClientTransport datagrams = null;
+            DtlsClient dtls = null;
             try
             {
                 socket.Bind(new IPEndPoint(server.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0));
                 socket.Connect(server);
-                var client = new DtlsStunClient(new BcTlsCrypto(new SecureRandom()), host, validation, HandshakeTimeout);
-                var datagrams = new SocketDatagramTransport(socket);
-                using (cancellationToken.Register(() => socket.Dispose()))
+                datagrams = new SocketClientTransport(socket);
+                var client = new DtlsClient(datagrams)
                 {
-                    var dtls = await Task.Run(() => new DtlsClientProtocol().Connect(client, datagrams), cancellationToken).ConfigureAwait(false);
-                    return new StunDtlsTransport(socket, dtls, server, host, validation);
+                    // of a name, not an address, its SNI (RFC 6066 3)
+                    ServerName = IPAddress.TryParse(host, out _) ? null : host,
+                };
+                dtls = client;
+                client.ServerCertificateValidator = (leaf, chain) => DtlsCertificates.Validate(chain, host, validation, client);
+
+                // what the association is told of, once its handshake is done: of the transport made of it
+                StunDtlsTransport transport = null;
+                var handshake = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                client.HandshakeFinished += (s, e) => handshake.TrySetResult(true);
+                client.Failed += (s, ex) =>
+                {
+                    handshake.TrySetException(new IOException("The DTLS handshake failed: " + ex.Message, ex));
+                    transport?.OnEnded(ex);
+                };
+                client.Closed += (s, e) =>
+                {
+                    handshake.TrySetException(new IOException("The DTLS association closed during its handshake."));
+                    transport?.OnEnded(null);
+                };
+                client.ApplicationDataReceived += (s, data) => transport?.OnRecord(data);
+                datagrams.Failed += ex =>
+                {
+                    handshake.TrySetException(ex);
+                    transport?.OnEnded(ex);
+                };
+
+                datagrams.Start();
+                client.BeginHandshake();
+                using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                {
+                    timeout.CancelAfter(DtlsDefaults.HandshakeTimeout);
+                    using (timeout.Token.Register(() => handshake.TrySetCanceled()))
+                        await handshake.Task.ConfigureAwait(false);
                 }
+                transport = new StunDtlsTransport(socket, datagrams, client, server, host, validation);
+                return transport;
             }
-            catch (Exception ex) when (ex is TlsException || ex is IOException || ex is ObjectDisposedException)
+            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is OperationCanceledException)
             {
-                socket.Dispose();
+                Abandon(socket, datagrams, dtls);
                 cancellationToken.ThrowIfCancellationRequested();
+                if (ex is OperationCanceledException)
+                    throw new IOException("The DTLS handshake timed out.", ex);
                 throw ex as IOException ?? new IOException("The DTLS handshake failed: " + ex.Message, ex);
             }
             catch
             {
-                socket.Dispose();
+                Abandon(socket, datagrams, dtls);
                 throw;
+            }
+        }
+
+        private static void Abandon(Socket socket, SocketClientTransport datagrams, DtlsClient dtls)
+        {
+            datagrams?.Stop();
+            CloseQuietly(dtls);
+            socket.Dispose();
+        }
+
+        private static void CloseQuietly(DtlsClient dtls)
+        {
+            try
+            {
+                // its close_notify
+                dtls?.Close();
+            }
+            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is InvalidOperationException)
+            {
             }
         }
 
@@ -111,37 +156,47 @@ namespace SharpStunClient
 
         public override Task SendAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
         {
-            _dtls.Send(buffer, offset, count);
+            if (_closed)
+                throw new IOException("The DTLS association ended.");
+            // SharpDTLS takes a record's data as an array of its own
+            byte[] data = new byte[count];
+            Buffer.BlockCopy(buffer, offset, data, 0, count);
+            try
+            {
+                lock (_writing)
+                    _dtls.SendApplicationData(data);
+            }
+            catch (Exception ex) when (ex is SocketException || ex is InvalidOperationException || ex is ObjectDisposedException)
+            {
+                throw new IOException("The DTLS association ended: " + ex.Message, ex);
+            }
             return Task.CompletedTask;
         }
 
         public override async Task<StunTransport> RedirectAsync(IPEndPoint server, string domain, CancellationToken cancellationToken = default)
             => await ConnectAsync(server, domain ?? _host, _validation, cancellationToken).ConfigureAwait(false);
 
-        private void Receive()
+        // a record's data: a STUN message, or of TURN, ChannelData
+        private void OnRecord(byte[] data)
         {
-            byte[] buffer = new byte[ushort.MaxValue];
-            Exception error = null;
-            try
-            {
-                while (!_closed)
-                {
-                    int count = _dtls.Receive(buffer, 0, buffer.Length, 1000);
-                    if (count < 0)
-                        continue;
-                    var message = StunMessage.Parse(buffer, 0, count);
-                    if (message != null)
-                        OnMessageReceived(message, RemoteEndPoint);
-                    else if (count >= 4 && StunFraming.IsChannelData(buffer[0]))
-                        OnDataReceived(buffer, 0, count);
-                }
-            }
-            catch (Exception ex) when (ex is IOException || ex is TlsException || ex is ObjectDisposedException || ex is SocketException)
-            {
-                error = ex;
-            }
-            if (!_closed)
-                OnClosed(error);
+            if (_closed)
+                return;
+            var message = StunMessage.Parse(data, 0, data.Length);
+            if (message != null)
+                OnMessageReceived(message, RemoteEndPoint);
+            else if (data.Length >= 4 && StunFraming.IsChannelData(data[0]))
+                OnDataReceived(data, 0, data.Length);
+        }
+
+        // the association ended of the server's close_notify, of an alert, or of its port unreachable
+        private void OnEnded(Exception error)
+        {
+            if (_closed)
+                return;
+            _closed = true;
+            _datagrams.Stop();
+            _socket.Dispose();
+            OnClosed(error);
         }
 
         public override void Dispose()
@@ -149,111 +204,96 @@ namespace SharpStunClient
             if (_closed)
                 return;
             _closed = true;
-            try
-            {
-                // its close_notify
-                _dtls.Close();
-            }
-            catch (Exception ex) when (ex is IOException || ex is TlsException || ex is ObjectDisposedException || ex is SocketException)
-            {
-            }
+            lock (_writing)
+                CloseQuietly(_dtls);
+            _datagrams.Stop();
             _socket.Dispose();
         }
     }
 
-    /// <summary>A DTLS 1.2 client of the server's name, of SNI, its certificate checked as <see cref="DtlsCertificates.Validate"/> checks it.</summary>
-    internal sealed class DtlsStunClient : DefaultTlsClient
-    {
-        private readonly string _host;
-        private readonly RemoteCertificateValidationCallback _validation;
-        private readonly int _timeout;
-
-        public DtlsStunClient(TlsCrypto crypto, string host, RemoteCertificateValidationCallback validation, int timeout) : base(crypto)
-        {
-            _host = host;
-            _validation = validation;
-            _timeout = timeout;
-        }
-
-        protected override ProtocolVersion[] GetSupportedVersions() => ProtocolVersion.DTLSv12.Only();
-
-        protected override IList<ServerName> GetSniServerNames()
-        {
-            // a name, not an address (RFC 6066 3)
-            if (IPAddress.TryParse(_host, out _))
-                return null;
-            return new List<ServerName> { new ServerName(NameType.host_name, System.Text.Encoding.ASCII.GetBytes(_host)) };
-        }
-
-        public override int GetHandshakeTimeoutMillis() => _timeout;
-
-        public override TlsAuthentication GetAuthentication() => new Authentication(this);
-
-        private sealed class Authentication : TlsAuthentication
-        {
-            private readonly DtlsStunClient _client;
-
-            public Authentication(DtlsStunClient client) => _client = client;
-
-            public void NotifyServerCertificate(TlsServerCertificate serverCertificate)
-            {
-                if (!DtlsCertificates.Validate(serverCertificate.Certificate, _client._host, _client._validation, _client))
-                    throw new TlsFatalAlert(AlertDescription.bad_certificate);
-            }
-
-            public TlsCredentials GetClientCredentials(Org.BouncyCastle.Tls.CertificateRequest certificateRequest) => null;
-        }
-    }
-
-    /// <summary>The datagrams of a socket connected to the peer, as BouncyCastle's DTLS reads and writes them.</summary>
-    internal sealed class SocketDatagramTransport : DatagramTransport
+    /// <summary>
+    /// The datagrams of a socket connected to the server, as SharpDTLS reads and writes them: each handed to the client, as it
+    /// comes, of a thread of its own.
+    /// </summary>
+    internal sealed class SocketClientTransport : IClientTransport
     {
         private readonly Socket _socket;
+        private readonly Thread _receiver;
+        private volatile bool _stopped;
 
-        public SocketDatagramTransport(Socket socket) => _socket = socket;
-
-        public int GetReceiveLimit() => ushort.MaxValue;
-
-        public int GetSendLimit() => DtlsDefaults.Mtu - 28;
-
-        public int Receive(byte[] buf, int off, int len, int waitMillis)
+        public SocketClientTransport(Socket socket)
         {
-#if NETCOREAPP
-            return Receive(buf.AsSpan(off, len), waitMillis);
+            _socket = socket;
+            _receiver = new Thread(Receive) { IsBackground = true, Name = "STUN over DTLS" };
         }
 
-        public int Receive(Span<byte> buffer, int waitMillis)
+        public event EventHandler<byte[]> OnDataReceived;
+
+        /// <summary>Of an ICMP port unreachable of the server's port: no server there.</summary>
+        public event Action<IOException> Failed;
+
+        public void Start() => _receiver.Start();
+
+        public void Stop() => _stopped = true;
+
+        public void Send(byte[] buf)
         {
-#endif
+            if (_stopped)
+                return;
             try
             {
-                if (!_socket.Poll(Math.Max(1, waitMillis) * 1000, SelectMode.SelectRead))
-                    return -1;
-#if NETCOREAPP
-                return _socket.Receive(buffer, SocketFlags.None);
-#else
-                return _socket.Receive(buf, off, len, SocketFlags.None);
-#endif
+                _socket.Send(buf, 0, buf.Length, SocketFlags.None);
             }
-            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset || ex.SocketErrorCode == SocketError.ConnectionRefused)
+            catch (ObjectDisposedException)
             {
-                // an ICMP port unreachable, as the socket is connected: no server there, as of a TCP connection refused
-                throw new IOException("The server's port is unreachable.", ex);
             }
             catch (SocketException)
             {
-                return -1;
+                // a datagram lost, as of UDP: the handshake retransmits it, and an unreachable port is told of the receiver
             }
         }
 
-        public void Send(byte[] buf, int off, int len) => _socket.Send(buf, off, len, SocketFlags.None);
-
-#if NETCOREAPP
-        public void Send(ReadOnlySpan<byte> buffer) => _socket.Send(buffer, SocketFlags.None);
-#endif
-
-        public void Close()
+        private void Receive()
         {
+            byte[] buffer = new byte[ushort.MaxValue];
+            var remote = _socket.RemoteEndPoint;
+            while (!_stopped)
+            {
+                int count;
+                try
+                {
+                    if (!_socket.Poll(1000 * 1000, SelectMode.SelectRead))
+                        continue;
+                    count = _socket.Receive(buffer, 0, buffer.Length, SocketFlags.None);
+                }
+                catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset || ex.SocketErrorCode == SocketError.ConnectionRefused)
+                {
+                    // an ICMP port unreachable, as the socket is connected: no server there, as of a TCP connection refused
+                    if (!_stopped)
+                        Failed?.Invoke(new IOException("The server's port is unreachable.", ex));
+                    return;
+                }
+                catch (SocketException)
+                {
+                    continue;
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+                if (count <= 0 || _stopped)
+                    continue;
+                byte[] datagram = new byte[count];
+                Buffer.BlockCopy(buffer, 0, datagram, 0, count);
+                try
+                {
+                    OnDataReceived?.Invoke(remote, datagram);
+                }
+                catch (Exception)
+                {
+                    // of a thread of its own: a datagram the client failed of is the association's to tell of, never the process's
+                }
+            }
         }
     }
 }

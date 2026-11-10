@@ -26,6 +26,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -81,6 +82,18 @@ namespace SharpTurnServer
         public int MaxPermissionsPerAllocation { get; set; } = 128;
 
         /// <summary>
+        /// Whether a client of TCP or TLS may have a TCP allocation (RFC 6062): a relay of TCP, of connections to and of its
+        /// peers. Of false, one asked for is answered 442.
+        /// </summary>
+        public bool AllowTcpAllocations { get; set; } = true;
+
+        /// <summary>
+        /// How many connections of peers a TCP allocation has at most at once - those being made, and those waiting for their
+        /// ConnectionBind, too: a Connect past them is answered 508, a peer that connects past them closed.
+        /// </summary>
+        public int MaxConnectionsPerAllocation { get; set; } = 32;
+
+        /// <summary>
         /// Whether data may be relayed to and of a peer: of one refused, its permission or channel is answered 403 and a Send
         /// indication to it dropped (RFC 8656 10.2, 11.2, 12.2). Of its default, <see cref="TurnPeers.IsPublic(IPEndPoint)"/>:
         /// public unicast addresses alone, as a server is not to reach its own network; of a server for a private network,
@@ -102,7 +115,9 @@ namespace SharpTurnServer
     /// A TURN server (RFC 8656) of UDP allocations, over UDP, TCP, TLS and DTLS between the client and it - the transports of
     /// <see cref="StunServer"/>, which it answers Binding requests of too. Of each allocation, a relay of UDP of its own - or
     /// two, of IPv4 and IPv6 - its permissions and channels; the peers' data relayed to the client as Data indications, or as
-    /// ChannelData of a channel bound to the peer.
+    /// ChannelData of a channel bound to the peer. Of a client of TCP or TLS, a TCP allocation too (RFC 6062): a relay of TCP,
+    /// of a connection to a peer of each Connect, and of each peer of a permission that connects to it, each relayed as it is
+    /// over a data connection of the client's of its own, of a ConnectionBind.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -114,7 +129,15 @@ namespace SharpTurnServer
     /// </para>
     /// <para>
     /// An allocation of TCP or TLS ends with its connection; one of UDP or DTLS, with its lifetime. ICMP errors the relays get
-    /// are not told of: the system does not say of which peer they are. TCP allocations (RFC 6062) are not done.
+    /// are not told of: the system does not say of which peer they are.
+    /// </para>
+    /// <para>
+    /// Of a TCP allocation (RFC 6062): of a control connection of TCP or TLS alone (400), of no DONT-FRAGMENT, EVEN-PORT,
+    /// RESERVATION-TOKEN or ADDITIONAL-ADDRESS-FAMILY (400). A Connect is answered once its connection, of the relayed
+    /// address, is made - 30 seconds at most - of a CONNECTION-ID, or 447; one to a peer a connection is of already, 446. A
+    /// peer that connects of no permission is closed, else told of a ConnectionAttempt. A peer's connection of no
+    /// ConnectionBind in 30 seconds is closed; until it, what the peer sends is left in its socket, of TCP's own window. Each
+    /// data connection closes with its peer's, and the other way round, and all of them with the allocation.
     /// </para>
     /// </remarks>
     public sealed class TurnServer : IDisposable
@@ -125,7 +148,9 @@ namespace SharpTurnServer
 
         private sealed class Relay
         {
+            // of UDP, its socket; of TCP, the listener of its peers' connections
             public Socket Socket;
+            public TcpListener Listener;
             public UdpSender Sender;
             // the DF bit the socket is of now: set again only as a Send indication's DONT-FRAGMENT changes it
             public bool DontFragment;
@@ -155,6 +180,10 @@ namespace SharpTurnServer
             public readonly Dictionary<ushort, Channel> Channels = new Dictionary<ushort, Channel>();
             public bool Closed;
 
+            // of a TCP allocation (RFC 6062): its relay of TCP, and its peers' connections, of their CONNECTION-IDs
+            public bool IsTcp;
+            public readonly Dictionary<uint, TcpPeer> Connections = new Dictionary<uint, TcpPeer>();
+
             public Relay RelayOf(AddressFamily family)
             {
                 foreach (var relay in Relays)
@@ -176,6 +205,23 @@ namespace SharpTurnServer
             }
         }
 
+        // a peer's connection of a TCP allocation: being made of a Connect, waiting for its ConnectionBind, or bound - relayed
+        // as it is to a data connection of the client's
+        private sealed class TcpPeer
+        {
+            public uint Id;
+            public Allocation Allocation;
+            public IPEndPoint Peer;
+            public TcpClient Client;
+            // of a Connect, until its connection is made
+            public bool Connecting;
+            // since when it waits for its ConnectionBind
+            public DateTime Waiting;
+            public bool Bound;
+            public Stream Data;
+            public bool Closed;
+        }
+
         private sealed class Reservation
         {
             public Socket Socket;
@@ -188,7 +234,14 @@ namespace SharpTurnServer
         private readonly object _sync = new object();
         private readonly Dictionary<string, Allocation> _allocations = new Dictionary<string, Allocation>();
         private readonly Dictionary<string, Reservation> _reservations = new Dictionary<string, Reservation>();
-        private readonly Random _random = new Random();
+        // the peers' connections of every TCP allocation, of their CONNECTION-IDs, of a ConnectionBind to find
+        private readonly Dictionary<uint, TcpPeer> _tcpPeers = new Dictionary<uint, TcpPeer>();
+        // of the relays' ports, one of every server of the process: of .NET Framework, two made in one tick of the clock would
+        // be of one seed, and pick their ports alike
+        private static readonly Random _random = new Random();
+
+        // a TCP relay's port taken of one server at a time, of this process: as it is bound of reuse, of a probe of it first
+        private static readonly object TcpBinding = new object();
         private readonly Timer _timer;
 
         public TurnServer(TurnServerOptions options = null)
@@ -295,6 +348,10 @@ namespace SharpTurnServer
                     return OfAllocation(request, CreatePermission);
                 case TurnMethod.ChannelBind:
                     return OfAllocation(request, ChannelBind);
+                case TurnMethod.Connect:
+                    return OfAllocation(request, Connect);
+                case TurnMethod.ConnectionBind:
+                    return ConnectionBind(request);
                 default:
                     return null;
             }
@@ -331,8 +388,23 @@ namespace SharpTurnServer
             byte? transport = message.GetRequestedTransport();
             if (transport == null)
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
-            if (transport != TurnConstants.Udp)
+            bool tcp = transport == TurnConstants.Tcp;
+            if (tcp)
+            {
+                // of a TCP allocation (RFC 6062 5.1): of a control connection of TCP or TLS, of none of what a relay of UDP is of;
+                // of one relayed address, its control connection its own
+                if (!_options.AllowTcpAllocations)
+                    return request.Error(TurnErrorCode.UnsupportedTransportProtocol, "Unsupported Transport Protocol");
+                if (!request.Connection.IsStream)
+                    return request.Error(StunErrorCode.BadRequest, "Bad Request");
+                if (message.HasAttribute(TurnAttributeType.DontFragment) || message.HasAttribute(TurnAttributeType.EvenPort)
+                    || message.HasAttribute(TurnAttributeType.ReservationToken) || message.HasAttribute(TurnAttributeType.AdditionalAddressFamily))
+                    return request.Error(StunErrorCode.BadRequest, "Bad Request");
+            }
+            else if (transport != TurnConstants.Udp)
+            {
                 return request.Error(TurnErrorCode.UnsupportedTransportProtocol, "Unsupported Transport Protocol");
+            }
 
             var token = message.GetAttribute(TurnAttributeType.ReservationToken);
             bool? evenPort = message.GetEvenPort();
@@ -372,9 +444,17 @@ namespace SharpTurnServer
                 Connection = request.Connection,
                 Username = request.Username,
                 TransactionId = message.TransactionId,
+                IsTcp = tcp,
             };
 
-            if (token != null)
+            if (tcp)
+            {
+                var listener = BindTcp(RelayAddressOf(family, request.Connection));
+                if (listener == null)
+                    return request.Error(TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
+                allocation.Relays.Add(MakeTcpRelay(listener, expires));
+            }
+            else if (token != null)
             {
                 // of a port reserved of an EVEN-PORT before
                 Reservation reservation;
@@ -424,8 +504,8 @@ namespace SharpTurnServer
             lock (_sync)
                 _allocations[key] = allocation;
             foreach (var relay in allocation.Relays)
-                _ = RelayAsync(allocation, relay);
-            Trace($"Allocated {string.Join(", ", allocation.Relays.Select(r => r.EndPoint))} for {request.Connection.RemoteEndPoint} of {allocation.Username}");
+                _ = relay.Listener != null ? AcceptPeersAsync(allocation, relay) : RelayAsync(allocation, relay);
+            Trace($"Allocated {(tcp ? "TCP " : "")}{string.Join(", ", allocation.Relays.Select(r => r.EndPoint))} for {request.Connection.RemoteEndPoint} of {allocation.Username}");
             return Allocated(request, allocation);
         }
 
@@ -503,6 +583,9 @@ namespace SharpTurnServer
 
         private StunMessage ChannelBind(StunServerRequest request, Allocation allocation)
         {
+            // of a TCP allocation, no channels: its data goes over connections of their own (RFC 6062 3)
+            if (allocation.IsTcp)
+                return request.Error(StunErrorCode.BadRequest, "Bad Request");
             var message = request.Message;
             ushort? number = message.GetChannelNumber();
             var peer = message.GetXorAddress(TurnAttributeType.XorPeerAddress);
@@ -747,7 +830,8 @@ namespace SharpTurnServer
                 if (!_allocations.TryGetValue(key, out var allocation) || allocation.Closed)
                     return;
                 relay = allocation.RelayOf(peer.AddressFamily);
-                if (relay == null)
+                // of a relay of TCP, nothing of a Send indication: its data goes over connections of their own
+                if (relay == null || relay.Socket == null)
                     return;
                 if (checkPermission && (!allocation.Permissions.TryGetValue(peer.Address, out DateTime until) || until < DateTime.UtcNow))
                     return;
@@ -771,6 +855,344 @@ namespace SharpTurnServer
 
         #endregion // Relays
 
+        #region TCP allocations
+
+        private Relay MakeTcpRelay(TcpListener listener, DateTime expires)
+        {
+            var endPoint = (IPEndPoint)listener.LocalEndpoint;
+            var advertised = _options.AdvertisedRelayAddress != null && endPoint.AddressFamily == _options.AdvertisedRelayAddress.AddressFamily
+                ? new IPEndPoint(_options.AdvertisedRelayAddress, endPoint.Port)
+                : endPoint;
+            return new Relay { Listener = listener, EndPoint = endPoint, Advertised = advertised, Expires = expires };
+        }
+
+        // a listener of TCP of a port of the range at random: its port the one the connections of Connect are made of too, the
+        // relayed address their peers see (RFC 6062 5.2)
+        private TcpListener BindTcp(IPAddress address)
+        {
+            if (address == null)
+                return null;
+            for (int attempt = 0; attempt < 64; attempt++)
+            {
+                int port;
+                lock (_random)
+                    port = _random.Next(_options.PortMin, _options.PortMax + 1);
+                lock (TcpBinding)
+                {
+                    // of a port no socket has: one of reuse is bound over another's of reuse - another relay's - which would
+                    // take its peers' connections
+                    if (!IsFreeTcpPort(address, port))
+                        continue;
+                    var listener = new TcpListener(address, port);
+                    try
+                    {
+                        // a port of a listener bound again - of a connection of Connect - of the address reused of both; of
+                        // Windows, of a listener not of its exclusive use, as .NET's is of it there
+                        if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+                            listener.ExclusiveAddressUse = false;
+                        listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                        listener.Start();
+                        return listener;
+                    }
+                    catch (SocketException)
+                    {
+                        listener.Stop();
+                    }
+                }
+            }
+            return null;
+        }
+
+        // whether a socket of no reuse is bound of the port: of none of anyone's - a listener of reuse too - on it
+        private static bool IsFreeTcpPort(IPAddress address, int port)
+        {
+            using (var probe = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp))
+            {
+                try
+                {
+                    probe.Bind(new IPEndPoint(address, port));
+                    return true;
+                }
+                catch (SocketException)
+                {
+                    return false;
+                }
+            }
+        }
+
+        // under the lock: a peer's connection of the allocation, of a CONNECTION-ID of none other's
+        private TcpPeer AddTcpPeer(Allocation allocation, IPEndPoint peer, TcpClient client, bool connecting)
+        {
+            byte[] value = new byte[4];
+            uint id;
+            using (var random = RandomNumberGenerator.Create())
+            {
+                do
+                {
+                    random.GetBytes(value);
+                    id = BinaryPrimitives.ReadUInt32BigEndian(value);
+                }
+                while (id == 0 || _tcpPeers.ContainsKey(id));
+            }
+            var tcpPeer = new TcpPeer { Id = id, Allocation = allocation, Peer = peer, Client = client, Connecting = connecting, Waiting = DateTime.UtcNow };
+            allocation.Connections[id] = tcpPeer;
+            _tcpPeers[id] = tcpPeer;
+            return tcpPeer;
+        }
+
+        // the peers' connections to the relayed address: of a permission of their address, told of to the client of a
+        // ConnectionAttempt; else closed as they are accepted (RFC 6062 5.3)
+        private async Task AcceptPeersAsync(Allocation allocation, Relay relay)
+        {
+            while (true)
+            {
+                TcpClient client;
+                try
+                {
+                    client = await relay.Listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is ObjectDisposedException || ex is InvalidOperationException)
+                {
+                    return;
+                }
+                catch (SocketException)
+                {
+                    if (allocation.Closed)
+                        return;
+                    continue;
+                }
+
+                IPEndPoint peer;
+                try
+                {
+                    var remote = (IPEndPoint)client.Client.RemoteEndPoint;
+                    peer = new IPEndPoint(Normalize(remote.Address), remote.Port);
+                }
+                catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
+                {
+                    client.Dispose();
+                    continue;
+                }
+
+                TcpPeer accepted = null;
+                string refused = null;
+                lock (_sync)
+                {
+                    if (allocation.Closed)
+                        refused = "its allocation ended";
+                    else if (!allocation.Permissions.TryGetValue(peer.Address, out DateTime until) || until < DateTime.UtcNow)
+                        refused = "of no permission";
+                    else if (allocation.Connections.Count >= _options.MaxConnectionsPerAllocation)
+                        refused = $"{_options.MaxConnectionsPerAllocation} connections already";
+                    else if (allocation.Connections.Values.Any(c => c.Peer.Equals(peer)))
+                        refused = "a connection of the peer's already";
+                    else
+                        accepted = AddTcpPeer(allocation, peer, client, false);
+                }
+                if (accepted == null)
+                {
+                    Trace($"Connection of {peer} to {relay.EndPoint} closed: {refused}");
+                    client.Dispose();
+                    if (allocation.Closed)
+                        return;
+                    continue;
+                }
+
+                var attempt = new StunMessage(TurnMethod.ConnectionAttempt, StunMessageClass.Indication)
+                    .AddXorAddress(peer, TurnAttributeType.XorPeerAddress)
+                    .AddConnectionId(accepted.Id);
+                if (_options.Stun.Software != null)
+                    attempt.AddString(StunAttributeType.Software, _options.Stun.Software);
+                if (allocation.Connection.Send(attempt.ToBytes(null, false)))
+                    Trace($"Connection {accepted.Id} of {peer} to {relay.EndPoint}: told of to {allocation.Connection.RemoteEndPoint}");
+                else
+                    CloseTcpPeer(accepted, "its client's control connection ended");
+            }
+        }
+
+        // a Connect (RFC 6062 5.2): a connection to the peer of the relayed address, answered once it is made, of its
+        // CONNECTION-ID, or once it failed, 447; one of a peer the allocation has a connection of already, 446
+        private StunMessage Connect(StunServerRequest request, Allocation allocation)
+        {
+            if (!allocation.IsTcp)
+                return request.Error(StunErrorCode.BadRequest, "Bad Request");
+            var peer = request.Message.GetXorAddress(TurnAttributeType.XorPeerAddress);
+            if (peer == null)
+                return request.Error(StunErrorCode.BadRequest, "Bad Request");
+            peer = new IPEndPoint(Normalize(peer.Address), peer.Port);
+            Relay relay;
+            lock (_sync)
+                relay = allocation.RelayOf(peer.AddressFamily);
+            if (relay == null)
+                return request.Error(TurnErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
+            if (!IsAllowed(peer))
+                return request.Error(TurnErrorCode.Forbidden, "Forbidden");
+
+            TcpPeer pending;
+            lock (_sync)
+            {
+                if (allocation.Closed)
+                    return request.Error(TurnErrorCode.AllocationMismatch, "Allocation Mismatch");
+                // one connection of a peer's transport address, being made, waiting or bound (RFC 6062 3, 5.2)
+                if (allocation.Connections.Values.Any(c => c.Peer.Equals(peer)))
+                    return request.Error(TurnErrorCode.ConnectionAlreadyExists, "Connection Already Exists");
+                if (allocation.Connections.Count >= _options.MaxConnectionsPerAllocation)
+                    return request.Error(TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
+                pending = AddTcpPeer(allocation, peer, null, true);
+            }
+            _ = ConnectPeerAsync(request, relay, pending);
+            // answered of the connection, once it is made or it failed
+            return null;
+        }
+
+        private async Task ConnectPeerAsync(StunServerRequest request, Relay relay, TcpPeer pending)
+        {
+            var socket = new Socket(pending.Peer.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+            string failure = null;
+            try
+            {
+                // of the relayed address, its listener's port (RFC 6062 5.2)
+                socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                socket.Bind(relay.EndPoint);
+                var connect = socket.ConnectAsync(pending.Peer);
+                if (await Task.WhenAny(connect, Task.Delay(TurnConstants.ConnectTimeout)).ConfigureAwait(false) != connect)
+                    throw new SocketException((int)SocketError.TimedOut);
+                await connect.ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
+            {
+                failure = ex.Message;
+            }
+
+            StunMessage response = null;
+            lock (_sync)
+            {
+                if (failure == null && !pending.Closed && !pending.Allocation.Closed)
+                {
+                    pending.Client = new TcpClient { Client = socket };
+                    pending.Connecting = false;
+                    pending.Waiting = DateTime.UtcNow;
+                    response = request.Success().AddConnectionId(pending.Id);
+                }
+                else
+                {
+                    failure ??= "its allocation ended";
+                }
+            }
+            if (response == null)
+            {
+                socket.Dispose();
+                CloseTcpPeer(pending, "its Connect failed: " + failure);
+                response = request.Error(TurnErrorCode.ConnectionTimeoutOrFailure, "Connection Timeout or Failure");
+            }
+            else
+            {
+                Trace($"Connection {pending.Id} of {relay.EndPoint} to {pending.Peer}");
+            }
+            request.Respond(response);
+        }
+
+        // a ConnectionBind (RFC 6062 5.4): a new connection of the client's - not its control connection - of the credentials
+        // of the allocation, of the CONNECTION-ID of a peer's connection waiting; relayed to it as it is once answered
+        private StunMessage ConnectionBind(StunServerRequest request)
+        {
+            var connection = request.Connection;
+            if (!connection.IsStream)
+                return request.Error(StunErrorCode.BadRequest, "Bad Request");
+            uint? id = request.Message.GetConnectionId();
+            if (id == null)
+                return request.Error(StunErrorCode.BadRequest, "Bad Request");
+            TcpPeer peer;
+            lock (_sync)
+            {
+                if (_allocations.ContainsKey(connection.Key))
+                    return request.Error(StunErrorCode.BadRequest, "Bad Request");
+                if (!_tcpPeers.TryGetValue(id.Value, out peer) || peer.Bound || peer.Connecting || peer.Closed || peer.Allocation.Closed)
+                    return request.Error(StunErrorCode.BadRequest, "Bad Request");
+                if (_options.Stun.Realm != null && peer.Allocation.Username != request.Username)
+                    return request.Error(TurnErrorCode.WrongCredentials, "Wrong Credentials");
+                peer.Bound = true;
+            }
+            connection.Handoff = stream => RelayTcpAsync(peer, stream);
+            Trace($"Connection {peer.Id} of {peer.Peer} bound to {connection.RemoteEndPoint}");
+            return request.Success();
+        }
+
+        // a peer's connection and the client's data connection of it, each relayed to the other as it is - what the peer sent
+        // before, left in its socket, first - until either ends, which ends the other (RFC 6062 5.4, 5.5)
+        private async Task RelayTcpAsync(TcpPeer peer, Stream data)
+        {
+            NetworkStream peerStream;
+            lock (_sync)
+            {
+                if (peer.Closed)
+                    return;
+                peer.Data = data;
+                peerStream = peer.Client.GetStream();
+            }
+            try
+            {
+                var toPeer = CopyAsync(data, peerStream);
+                var toClient = CopyAsync(peerStream, data);
+                await Task.WhenAny(toPeer, toClient).ConfigureAwait(false);
+            }
+            finally
+            {
+                CloseTcpPeer(peer, "its connection ended");
+            }
+        }
+
+        // of TCP's own flow control: what is not written is not read either (RFC 6062 3)
+        private static async Task CopyAsync(Stream from, Stream to)
+        {
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(16384);
+            try
+            {
+                while (true)
+                {
+                    int read = await from.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+                    if (read == 0)
+                        return;
+                    await to.WriteAsync(buffer, 0, read).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex) when (ex is IOException || ex is ObjectDisposedException || ex is SocketException || ex is InvalidOperationException)
+            {
+            }
+            finally
+            {
+                // of what TLS decrypted: cleared, before the pool hands it to anything else
+                ArrayPool<byte>.Shared.Return(buffer, true);
+            }
+        }
+
+        private void CloseTcpPeer(TcpPeer peer, string why)
+        {
+            TcpClient client;
+            Stream data;
+            lock (_sync)
+            {
+                if (peer.Closed)
+                    return;
+                peer.Closed = true;
+                peer.Allocation.Connections.Remove(peer.Id);
+                _tcpPeers.Remove(peer.Id);
+                client = peer.Client;
+                data = peer.Data;
+            }
+            client?.Dispose();
+            try
+            {
+                data?.Dispose();
+            }
+            catch (Exception ex) when (ex is IOException || ex is ObjectDisposedException || ex is SocketException)
+            {
+            }
+            Trace($"Connection {peer.Id} of {peer.Peer} closed: {why}");
+        }
+
+        #endregion // TCP allocations
+
         #region Lifetimes
 
         // what expired: relays and the allocations of none left, permissions, channels, reservations
@@ -778,9 +1200,12 @@ namespace SharpTurnServer
         {
             var expired = new List<(Allocation, Relay)>();
             var released = new List<Socket>();
+            List<TcpPeer> unbound;
             lock (_sync)
             {
                 DateTime now = DateTime.UtcNow;
+                // the peers' connections of no ConnectionBind in time (RFC 6062 5.2, 5.3)
+                unbound = _tcpPeers.Values.Where(p => !p.Bound && !p.Connecting && now - p.Waiting > TurnConstants.ConnectionBindTimeout).ToList();
                 foreach (var allocation in _allocations.Values)
                 {
                     expired.AddRange(allocation.Relays.Where(r => r.Expires <= now).Select(r => (allocation, r)));
@@ -795,6 +1220,8 @@ namespace SharpTurnServer
                     _reservations.Remove(token);
                 }
             }
+            foreach (var peer in unbound)
+                CloseTcpPeer(peer, "no ConnectionBind of it in time");
             foreach (var (allocation, relay) in expired)
                 RemoveRelay(allocation, relay, "expired");
             foreach (var socket in released)
@@ -805,11 +1232,15 @@ namespace SharpTurnServer
         {
             bool last;
             Socket reserved = null;
+            List<TcpPeer> connections = null;
             lock (_sync)
             {
                 if (!allocation.Relays.Remove(relay))
                     return;
                 last = allocation.Relays.Count == 0;
+                // of a TCP allocation, its peers' connections, and the client's data connections of them, with it (RFC 6062 5.5)
+                if (last)
+                    connections = allocation.Connections.Values.ToList();
                 // its permissions and channels with it (RFC 8656 8.1)
                 foreach (var address in allocation.Permissions.Keys.Where(a => a.AddressFamily == relay.Family).ToList())
                     allocation.Permissions.Remove(address);
@@ -828,8 +1259,14 @@ namespace SharpTurnServer
                     }
                 }
             }
-            relay.Socket.Dispose();
+            relay.Socket?.Dispose();
+            relay.Listener?.Stop();
             reserved?.Dispose();
+            if (connections != null)
+            {
+                foreach (var connection in connections)
+                    CloseTcpPeer(connection, "its allocation ended");
+            }
             Trace($"Relay {relay.EndPoint} of {allocation.Connection.RemoteEndPoint} {why}");
         }
 

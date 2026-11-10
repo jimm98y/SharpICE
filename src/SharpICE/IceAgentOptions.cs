@@ -90,6 +90,25 @@ namespace SharpICE
         public bool IncludeTcp { get; set; } = false;
 
         /// <summary>
+        /// Whether to gather candidates of ICE-TCP over TLS, of SharpDTLS: of each address, a passive and an active one as of
+        /// <see cref="IncludeTcp"/>, each connection of them of TLS 1.3 or 1.2 - the active side its client - and of transport
+        /// "tls" in SDP. Of a peer past a firewall that lets TLS alone through; TCP's are preferred over them. No other agent
+        /// signals these, so both peers are to be of SharpICE.
+        /// </summary>
+        /// <remarks>
+        /// The TLS of them hides the checks and the data from the network, and passes a firewall; it authenticates no one, for
+        /// the peer's certificate is known of nothing signalled: what does is ICE's own MESSAGE-INTEGRITY of each check, and
+        /// DTLS-SRTP's fingerprint of the media.
+        /// </remarks>
+        public bool IncludeTls { get; set; } = false;
+
+        /// <summary>
+        /// The certificate the passive candidates of TLS answer of, its private key exportable; of none, one of the agent's
+        /// own, self-signed.
+        /// </summary>
+        public System.Security.Cryptography.X509Certificates.X509Certificate2 TlsCertificate { get; set; }
+
+        /// <summary>
         /// Whether the agent is an ICE lite one (RFC 8445 2.5): of host candidates alone, it sends no checks and answers the
         /// peer's, controlled, the pair the peer nominates selected. Of a server of an address the peer reaches; its session
         /// description is to say "a=ice-lite".

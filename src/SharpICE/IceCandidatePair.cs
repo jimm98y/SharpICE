@@ -66,6 +66,12 @@ namespace SharpICE
 
         public bool IsTcp => Local.IsTcp;
 
+        /// <summary>Of ICE-TCP over TLS: its connection of TLS.</summary>
+        public bool IsTls => Local.IsTls;
+
+        // of TCP or TLS: of a connection
+        internal bool IsStream => Local.IsStream;
+
         public IceCandidatePairState State { get; internal set; } = IceCandidatePairState.Waiting;
 
         /// <summary>Whether the controlling agent nominated it (RFC 8445 8.1.1): of a check of USE-CANDIDATE that succeeded.</summary>

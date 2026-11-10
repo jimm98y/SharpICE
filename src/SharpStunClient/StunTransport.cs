@@ -365,6 +365,14 @@ namespace SharpStunClient
                     if (parsed == null)
                         throw new InvalidDataException("The server sent a STUN message that is not well formed.");
                     OnMessageReceived(parsed, RemoteEndPoint);
+
+                    // the last message of STUN of the connection: nothing after it read, the stream its taker's
+                    var detach = DetachAfter;
+                    if (detach != null && detach(parsed))
+                    {
+                        _detached.TrySetResult(_stream);
+                        return;
+                    }
                 }
             }
             catch (Exception e) when (e is IOException || e is SocketException || e is InvalidDataException || e is ObjectDisposedException || e is OperationCanceledException)
@@ -376,9 +384,21 @@ namespace SharpStunClient
                 // of what TLS decrypted: cleared, before the pool hands it to anything else
                 ArrayPool<byte>.Shared.Return(buffer, true);
             }
+            _detached.TrySetException(new IOException("The connection ended before it was taken over.", error));
             if (!_cts.IsCancellationRequested)
                 OnClosed(error);
         }
+
+        private readonly TaskCompletionSource<Stream> _detached = new TaskCompletionSource<Stream>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>
+        /// Of TURN, a data connection's (RFC 6062 4.3): the message after which the connection is no longer of STUN - its
+        /// ConnectionBind's success response - set before the request is sent. Nothing past it is read of the transport.
+        /// </summary>
+        internal Func<StunMessage, bool> DetachAfter { get; set; }
+
+        /// <summary>The stream, once the message of <see cref="DetachAfter"/> came: its bytes, from then on, its taker's to read.</summary>
+        internal Task<Stream> DetachedAsync() => _detached.Task;
 
 #if NET8_0_OR_GREATER
         [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
