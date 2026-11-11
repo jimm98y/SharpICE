@@ -4,7 +4,7 @@
     <TargetFrameworks>netstandard2.0;net472;net8.0;net10.0</TargetFrameworks>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
-    <Description>A TURN client and server written in C#: UDP allocations over UDP, TCP, TLS and DTLS, and TCP allocations (RFC 6062) over TCP and TLS.</Description>
+    <Description>A TURN client and server written in C#.</Description>
   </PropertyGroup>
 
   <ItemGroup>
