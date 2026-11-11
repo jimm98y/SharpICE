@@ -1,0 +1,31 @@
+const SharpTURN.TurnAttributeType.ConnectionId = 42 -> ushort
+const SharpTURN.TurnConstants.Tcp = 6 -> byte
+const SharpTURN.TurnErrorCode.ConnectionAlreadyExists = 446 -> int
+const SharpTURN.TurnErrorCode.ConnectionTimeoutOrFailure = 447 -> int
+const SharpTURN.TurnMethod.Connect = 10 -> ushort
+const SharpTURN.TurnMethod.ConnectionAttempt = 12 -> ushort
+const SharpTURN.TurnMethod.ConnectionBind = 11 -> ushort
+SharpTURN.TurnAllocateOptions.Tcp.get -> bool
+SharpTURN.TurnAllocateOptions.Tcp.set -> void
+SharpTURN.TurnClient.AcceptPeerAsync(SharpTURN.TurnConnectionAttemptEventArgs attempt, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpTURN.TurnTcpConnection>
+SharpTURN.TurnClient.ConnectionAttempt -> System.EventHandler<SharpTURN.TurnConnectionAttemptEventArgs>
+SharpTURN.TurnClient.ConnectPeerAsync(System.Net.IPEndPoint peer, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpTURN.TurnTcpConnection>
+SharpTURN.TurnClient.IsTcp.get -> bool
+SharpTURN.TurnConnectionAttemptEventArgs
+SharpTURN.TurnConnectionAttemptEventArgs.ConnectionId.get -> uint
+SharpTURN.TurnConnectionAttemptEventArgs.Peer.get -> System.Net.IPEndPoint
+SharpTURN.TurnConnectionAttemptEventArgs.TurnConnectionAttemptEventArgs(System.Net.IPEndPoint peer, uint connectionId) -> void
+SharpTURN.TurnServerOptions.AllowTcpAllocations.get -> bool
+SharpTURN.TurnServerOptions.AllowTcpAllocations.set -> void
+SharpTURN.TurnServerOptions.MaxConnectionsPerAllocation.get -> int
+SharpTURN.TurnServerOptions.MaxConnectionsPerAllocation.set -> void
+SharpTURN.TurnTcpConnection
+SharpTURN.TurnTcpConnection.ConnectionId.get -> uint
+SharpTURN.TurnTcpConnection.Dispose() -> void
+SharpTURN.TurnTcpConnection.LocalEndPoint.get -> System.Net.IPEndPoint
+SharpTURN.TurnTcpConnection.Peer.get -> System.Net.IPEndPoint
+SharpTURN.TurnTcpConnection.Stream.get -> System.IO.Stream
+static readonly SharpTURN.TurnConstants.ConnectionBindTimeout -> System.TimeSpan
+static readonly SharpTURN.TurnConstants.ConnectTimeout -> System.TimeSpan
+static SharpTURN.TurnMessageExtensions.AddConnectionId(this SharpSTUN.StunMessage message, uint connectionId) -> SharpSTUN.StunMessage
+static SharpTURN.TurnMessageExtensions.GetConnectionId(this SharpSTUN.StunMessage message) -> uint?

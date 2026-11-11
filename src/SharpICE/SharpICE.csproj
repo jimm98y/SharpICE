@@ -12,8 +12,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\SharpStun\SharpStun.csproj" />
-    <ProjectReference Include="..\SharpTurn\SharpTurn.csproj" />
+    <ProjectReference Include="..\SharpSTUN\SharpSTUN.csproj" />
+    <ProjectReference Include="..\SharpTURN\SharpTURN.csproj" />
   </ItemGroup>
 
 	<!-- the public API: listed in PublicAPI.*.txt, and checked against the last release (doc/public-api.md) -->

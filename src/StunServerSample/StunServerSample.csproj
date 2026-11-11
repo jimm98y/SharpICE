@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\SharpStun\SharpStun.csproj" />
+    <ProjectReference Include="..\SharpSTUN\SharpSTUN.csproj" />
   </ItemGroup>
 
 </Project>

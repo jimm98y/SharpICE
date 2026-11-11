@@ -2,8 +2,8 @@
 // process's threads), the garbage collections, and the packets per second - over loopback, a window of packets in flight.
 // Usage: SharpICE.Benchmark [packets] [ice|turn] [--trace]; run it in Release. --trace lists the types allocated, sampled.
 using SharpICE;
-using SharpStun;
-using SharpTurn;
+using SharpSTUN;
+using SharpTURN;
 using System.Diagnostics;
 using System.Diagnostics.Tracing;
 using System.Net;

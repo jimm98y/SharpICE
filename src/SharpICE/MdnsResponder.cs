@@ -19,7 +19,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-using SharpStun;
+using SharpSTUN;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;

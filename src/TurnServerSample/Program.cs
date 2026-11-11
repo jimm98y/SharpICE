@@ -2,8 +2,8 @@
 // TurnClientSample's of its defaults. Of its relays of the loopback by default, and of peers of the loopback - of a demo
 // on one host alone; of a relay address given, of public peers alone, as of a server of the internet.
 // Usage: TurnServerSample [port] [username] [password] [realm] [relayAddress]
-using SharpStun;
-using SharpTurn;
+using SharpSTUN;
+using SharpTURN;
 using System.Net;
 
 int port = args.Length > 0 ? int.Parse(args[0]) : 3479;

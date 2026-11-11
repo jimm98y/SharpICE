@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\SharpTurn\SharpTurn.csproj" />
+    <ProjectReference Include="..\SharpTURN\SharpTURN.csproj" />
   </ItemGroup>
 
 </Project>

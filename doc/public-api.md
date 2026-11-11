@@ -1,6 +1,6 @@
 # Public API
 
-What the libraries of SharpICE expose is written down, and a removal from it does not build until it is written down too, an addition warns until it is. The libraries are SharpICE, SharpStun and SharpTurn,
+What the libraries of SharpICE expose is written down, and a removal from it does not build until it is written down too, an addition warns until it is. The libraries are SharpICE, SharpSTUN and SharpTURN,
 and two checks run on every `dotnet build` of each:
 
 - **The API files.** `PublicAPI.Shipped.txt` and `PublicAPI.Unshipped.txt` next to each project list
@@ -17,7 +17,7 @@ and two checks run on every `dotnet build` of each:
 List what the RS0016 warnings name: accept their fix in the IDE ("Add to public API"), or from the command line:
 
 ```
-dotnet format analyzers src/SharpStun/SharpStun.csproj --diagnostics RS0016 --severity warn
+dotnet format analyzers src/SharpSTUN/SharpSTUN.csproj --diagnostics RS0016 --severity warn
 ```
 
 The new lines land in that project's `PublicAPI.Unshipped.txt`.
@@ -38,7 +38,7 @@ If package validation then reports a CP error, the change breaks code built agai
 framework or, once there is one, the last release. When that is intended, record it:
 
 ```
-dotnet build src/SharpStun/SharpStun.csproj -c Release -p:ApiCompatGenerateSuppressionFile=true
+dotnet build src/SharpSTUN/SharpSTUN.csproj -c Release -p:ApiCompatGenerateSuppressionFile=true
 ```
 
 That writes `CompatibilitySuppressions.xml` next to the project. Say in the pull request what broke.

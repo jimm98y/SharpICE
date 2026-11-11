@@ -1,5 +1,5 @@
-﻿using SharpStun;
-using SharpTurn;
+﻿using SharpSTUN;
+using SharpTURN;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 namespace SharpICE.Tests
 {
     /// <summary>
-    /// SharpTurn's client of coturn's server, of one given of the environment - inconclusive of none:
+    /// SharpTURN's client of coturn's server, of one given of the environment - inconclusive of none:
     /// <list type="bullet">
     /// <item><c>SHARPICE_COTURN_URI</c>: "turn:host:3478" (UDP and TCP of it are tried)</item>
     /// <item><c>SHARPICE_COTURN_TLS_URI</c>: "turns:host:5349", of a host name: TLS over each TLS stack, and DTLS over each

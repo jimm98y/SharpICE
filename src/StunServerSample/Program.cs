@@ -1,6 +1,6 @@
 ﻿// A STUN server of the Binding method over UDP and TCP, IPv4 and IPv6: StunClientSample's of its defaults.
 // Usage: StunServerSample [port]
-using SharpStun;
+using SharpSTUN;
 using System.Net;
 
 int port = args.Length > 0 ? int.Parse(args[0]) : 3478;

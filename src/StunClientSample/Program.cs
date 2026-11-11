@@ -1,7 +1,7 @@
 ﻿// A STUN client: the address a server sees this host's requests of. Of its defaults, of StunServerSample on this host.
 // Usage: StunClientSample [uri] [username] [password], e.g. stun:127.0.0.1:3478, stun:stun.l.google.com:19302 or
 // stuns:stun.example.org; or StunClientSample --tcp [host:port], of STUN over TCP, as a STUN URI has no transport (RFC 7064)
-using SharpStun;
+using SharpSTUN;
 using System.Net;
 using System.Net.Sockets;
 

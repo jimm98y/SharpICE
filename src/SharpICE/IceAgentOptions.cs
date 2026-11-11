@@ -69,18 +69,18 @@ namespace SharpICE
 
         /// <summary>
         /// The DTLS implementation of a TURN server of DTLS ("turns:...?transport=udp"): of
-        /// <see cref="SharpStun.DtlsStacks.SharpDtls"/>, the default, DTLS 1.3 and 1.2; of
-        /// <see cref="SharpStun.DtlsStacks.BouncyCastle"/>, DTLS 1.2.
+        /// <see cref="SharpSTUN.DtlsStacks.SharpDtls"/>, the default, DTLS 1.3 and 1.2; of
+        /// <see cref="SharpSTUN.DtlsStacks.BouncyCastle"/>, DTLS 1.2.
         /// </summary>
-        public SharpStun.IDtlsStack DtlsStack { get; set; } = SharpStun.DtlsStacks.Default;
+        public SharpSTUN.IDtlsStack DtlsStack { get; set; } = SharpSTUN.DtlsStacks.Default;
 
         /// <summary>
         /// The TLS implementation of a TURN server of TLS ("turns:..."): of
-        /// <see cref="SharpStun.TlsStacks.SharpDtls"/>, the default, TLS 1.3 and 1.2; of
-        /// <see cref="SharpStun.TlsStacks.BouncyCastle"/>, TLS 1.2; of <see cref="SharpStun.TlsStacks.System"/>,
+        /// <see cref="SharpSTUN.TlsStacks.SharpDtls"/>, the default, TLS 1.3 and 1.2; of
+        /// <see cref="SharpSTUN.TlsStacks.BouncyCastle"/>, TLS 1.2; of <see cref="SharpSTUN.TlsStacks.System"/>,
         /// .NET's SslStream.
         /// </summary>
-        public SharpStun.ITlsStack TlsStack { get; set; } = SharpStun.TlsStacks.Default;
+        public SharpSTUN.ITlsStack TlsStack { get; set; } = SharpSTUN.TlsStacks.Default;
 
         /// <summary>Whether to gather candidates of IPv6 addresses too, link-local ones left out.</summary>
         public bool IncludeIPv6 { get; set; } = true;

@@ -1,4 +1,4 @@
-﻿using SharpStun;
+﻿using SharpSTUN;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -344,11 +344,11 @@ namespace SharpICE.Tests
             Assert.AreEqual("found", await SendAndReceive(hiding, resolving, "found"));
         }
 
-        private static SharpTurn.TurnServer TurnServer(out string uri)
+        private static SharpTURN.TurnServer TurnServer(out string uri)
         {
-            var server = new SharpTurn.TurnServer(new SharpTurn.TurnServerOptions
+            var server = new SharpTURN.TurnServer(new SharpTURN.TurnServerOptions
             {
-                Stun = new SharpStun.StunServerOptions
+                Stun = new SharpSTUN.StunServerOptions
                 {
                     Realm = "example.org",
                     Users = new Dictionary<string, string> { ["user"] = "secret" },

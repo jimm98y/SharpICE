@@ -3,8 +3,8 @@
 // relay shown.
 // Usage: TurnClientSample [uri] [username] [password] [peer], e.g. turn:127.0.0.1:3479 user pass, or of a peer of another
 // host's, 192.0.2.1:5000
-using SharpStun;
-using SharpTurn;
+using SharpSTUN;
+using SharpTURN;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;

@@ -5,13 +5,13 @@ There are three libraries:
 
 | Library | What it is |
 |---|---|
-| SharpStun | A STUN client and server |
-| SharpTurn | A TURN client and server, built on SharpStun |
-| SharpICE | An ICE agent, built on SharpStun and SharpTurn |
+| SharpSTUN | A STUN client and server |
+| SharpTURN | A TURN client and server, built on SharpSTUN |
+| SharpICE | An ICE agent, built on SharpSTUN and SharpTURN |
 
 DTLS and TLS come from [SharpDTLS](https://github.com/jimm98y/SharpDTLS) by default. You can switch to BouncyCastle, or for TLS to .NET's `SslStream`.
 
-## SharpStun
+## SharpSTUN
 ### Client
 A STUN client ([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489)).
 
@@ -83,7 +83,7 @@ server.ListenTls(new IPEndPoint(IPAddress.Any, 5349));
 server.ListenDtls(new IPEndPoint(IPAddress.Any, 5349));
 ```
 
-## SharpTurn
+## SharpTURN
 ### Client
 A TURN client ([RFC 8656](https://www.rfc-editor.org/rfc/rfc8656)). It supports two kinds of allocation:
 - UDP allocations, over UDP, TCP, TLS or DTLS.

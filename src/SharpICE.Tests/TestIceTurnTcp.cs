@@ -18,11 +18,11 @@ namespace SharpICE.Tests
     {
         private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
 
-        private static SharpTurn.TurnServer TurnServer(out string uri)
+        private static SharpTURN.TurnServer TurnServer(out string uri)
         {
-            var server = new SharpTurn.TurnServer(new SharpTurn.TurnServerOptions
+            var server = new SharpTURN.TurnServer(new SharpTURN.TurnServerOptions
             {
-                Stun = new SharpStun.StunServerOptions
+                Stun = new SharpSTUN.StunServerOptions
                 {
                     Realm = "example.org",
                     Users = new Dictionary<string, string> { ["user"] = "secret" },

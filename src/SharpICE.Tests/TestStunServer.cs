@@ -1,5 +1,5 @@
-﻿using SharpStun;
-using SharpTurn;
+﻿using SharpSTUN;
+using SharpTURN;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -62,7 +62,7 @@ namespace SharpICE.Tests
 
             Assert.AreEqual(StunMessageClass.SuccessResponse, response.Class);
             Assert.AreEqual(Client, response.GetXorAddress());
-            Assert.AreEqual("SharpStunServer", response.GetString(StunAttributeType.Software));
+            Assert.AreEqual("SharpSTUNServer", response.GetString(StunAttributeType.Software));
             Assert.IsTrue(response.HasFingerprint && response.VerifyFingerprint());
             Assert.IsFalse(Ask(server, Binding(), fingerprint: false).HasFingerprint, "of a request of no FINGERPRINT, none");
         }

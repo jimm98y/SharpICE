@@ -24,9 +24,9 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 		Directory.Build.props = Directory.Build.props
 	EndProjectSection
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpStun", "SharpStun\SharpStun.csproj", "{269521E3-9976-4C3C-A9FE-2B84F7418291}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpSTUN", "SharpSTUN\SharpSTUN.csproj", "{269521E3-9976-4C3C-A9FE-2B84F7418291}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpTurn", "SharpTurn\SharpTurn.csproj", "{845CC778-D9BB-457A-92BF-CB0BDFA54526}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpTURN", "SharpTURN\SharpTURN.csproj", "{845CC778-D9BB-457A-92BF-CB0BDFA54526}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpICE.ChromeInterop", "SharpICE.ChromeInterop\SharpICE.ChromeInterop.csproj", "{A8F51ED4-F153-4B02-B0FA-D3D9E68E266B}"
 EndProject

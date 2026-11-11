@@ -1,0 +1,168 @@
+const SharpTURN.TurnAttributeType.AdditionalAddressFamily = 32768 -> ushort
+const SharpTURN.TurnAttributeType.AddressErrorCode = 32769 -> ushort
+const SharpTURN.TurnAttributeType.ChannelNumber = 12 -> ushort
+const SharpTURN.TurnAttributeType.Data = 19 -> ushort
+const SharpTURN.TurnAttributeType.DontFragment = 26 -> ushort
+const SharpTURN.TurnAttributeType.EvenPort = 24 -> ushort
+const SharpTURN.TurnAttributeType.Icmp = 32772 -> ushort
+const SharpTURN.TurnAttributeType.Lifetime = 13 -> ushort
+const SharpTURN.TurnAttributeType.RequestedAddressFamily = 23 -> ushort
+const SharpTURN.TurnAttributeType.RequestedTransport = 25 -> ushort
+const SharpTURN.TurnAttributeType.ReservationToken = 34 -> ushort
+const SharpTURN.TurnAttributeType.XorPeerAddress = 18 -> ushort
+const SharpTURN.TurnAttributeType.XorRelayedAddress = 22 -> ushort
+const SharpTURN.TurnConstants.MaxChannel = 20479 -> ushort
+const SharpTURN.TurnConstants.MinChannel = 16384 -> ushort
+const SharpTURN.TurnConstants.Udp = 17 -> byte
+const SharpTURN.TurnErrorCode.AddressFamilyNotSupported = 440 -> int
+const SharpTURN.TurnErrorCode.AllocationMismatch = 437 -> int
+const SharpTURN.TurnErrorCode.AllocationQuotaReached = 486 -> int
+const SharpTURN.TurnErrorCode.Forbidden = 403 -> int
+const SharpTURN.TurnErrorCode.InsufficientCapacity = 508 -> int
+const SharpTURN.TurnErrorCode.PeerAddressFamilyMismatch = 443 -> int
+const SharpTURN.TurnErrorCode.UnsupportedTransportProtocol = 442 -> int
+const SharpTURN.TurnErrorCode.WrongCredentials = 441 -> int
+const SharpTURN.TurnMethod.Allocate = 3 -> ushort
+const SharpTURN.TurnMethod.ChannelBind = 9 -> ushort
+const SharpTURN.TurnMethod.CreatePermission = 8 -> ushort
+const SharpTURN.TurnMethod.Data = 7 -> ushort
+const SharpTURN.TurnMethod.Refresh = 4 -> ushort
+const SharpTURN.TurnMethod.Send = 6 -> ushort
+SharpTURN.TurnAllocateOptions
+SharpTURN.TurnAllocateOptions.AddressFamily.get -> System.Net.Sockets.AddressFamily?
+SharpTURN.TurnAllocateOptions.AddressFamily.set -> void
+SharpTURN.TurnAllocateOptions.DontFragment.get -> bool
+SharpTURN.TurnAllocateOptions.DontFragment.set -> void
+SharpTURN.TurnAllocateOptions.Dual.get -> bool
+SharpTURN.TurnAllocateOptions.Dual.set -> void
+SharpTURN.TurnAllocateOptions.EvenPort.get -> bool
+SharpTURN.TurnAllocateOptions.EvenPort.set -> void
+SharpTURN.TurnAllocateOptions.Lifetime.get -> System.TimeSpan?
+SharpTURN.TurnAllocateOptions.Lifetime.set -> void
+SharpTURN.TurnAllocateOptions.ReservationToken.get -> byte[]
+SharpTURN.TurnAllocateOptions.ReservationToken.set -> void
+SharpTURN.TurnAllocateOptions.ReserveNextPort.get -> bool
+SharpTURN.TurnAllocateOptions.ReserveNextPort.set -> void
+SharpTURN.TurnAllocateOptions.TurnAllocateOptions() -> void
+SharpTURN.TurnAttributeType
+SharpTURN.TurnChannelData
+SharpTURN.TurnClient
+SharpTURN.TurnClient.AddressError.get -> (int Code, string Reason)?
+SharpTURN.TurnClient.AllocateAsync(SharpTURN.TurnAllocateOptions options = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpTURN.TurnClient.AllocationLost -> System.EventHandler<System.Exception>
+SharpTURN.TurnClient.BindChannelAsync(System.Net.IPEndPoint peer, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<ushort>
+SharpTURN.TurnClient.ChannelOf(System.Net.IPEndPoint peer) -> ushort?
+SharpTURN.TurnClient.Client.get -> SharpSTUN.StunClient
+SharpTURN.TurnClient.ConnectAsync(string uri, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpTURN.TurnClient.CreatePermissionAsync(params System.Net.IPAddress[] peers) -> System.Threading.Tasks.Task
+SharpTURN.TurnClient.CreatePermissionAsync(System.Collections.Generic.IEnumerable<System.Net.IPAddress> peers, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpTURN.TurnClient.DataReceived -> System.EventHandler<SharpTURN.TurnDataEventArgs>
+SharpTURN.TurnClient.DeallocateAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpTURN.TurnClient.Dispose() -> void
+SharpTURN.TurnClient.HasPermission(System.Net.IPAddress peer) -> bool
+SharpTURN.TurnClient.IcmpReceived -> System.EventHandler<SharpTURN.TurnIcmpEventArgs>
+SharpTURN.TurnClient.IsAllocated.get -> bool
+SharpTURN.TurnClient.Lifetime.get -> System.TimeSpan
+SharpTURN.TurnClient.MappedEndPoint.get -> System.Net.IPEndPoint
+SharpTURN.TurnClient.RefreshAsync(System.TimeSpan? lifetime = null, System.Net.Sockets.AddressFamily? family = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpTURN.TurnClient.RelayedEndPoint.get -> System.Net.IPEndPoint
+SharpTURN.TurnClient.RelayedEndPoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint>
+SharpTURN.TurnClient.ReservationToken.get -> byte[]
+SharpTURN.TurnClient.SendAsync(System.Net.IPEndPoint peer, byte[] buffer, int offset, int count, bool dontFragment = false, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpTURN.TurnClient.SendAsync(System.Net.IPEndPoint peer, byte[] data, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task
+SharpTURN.TurnClient.TrySend(System.Net.IPEndPoint peer, byte[] buffer, int offset, int count) -> bool
+SharpTURN.TurnClient.TurnClient(SharpSTUN.StunClient client, bool ownsClient = false) -> void
+SharpTURN.TurnClient.TurnClient(SharpSTUN.StunClientOptions options) -> void
+SharpTURN.TurnConstants
+SharpTURN.TurnDataEventArgs
+SharpTURN.TurnDataEventArgs.Buffer.get -> byte[]
+SharpTURN.TurnDataEventArgs.Count.get -> int
+SharpTURN.TurnDataEventArgs.Offset.get -> int
+SharpTURN.TurnDataEventArgs.Peer.get -> System.Net.IPEndPoint
+SharpTURN.TurnDataEventArgs.ToArray() -> byte[]
+SharpTURN.TurnDataEventArgs.TurnDataEventArgs(System.Net.IPEndPoint peer, byte[] buffer, int offset, int count) -> void
+SharpTURN.TurnErrorCode
+SharpTURN.TurnException
+SharpTURN.TurnException.Code.get -> int
+SharpTURN.TurnException.Reason.get -> string
+SharpTURN.TurnException.Response.get -> SharpSTUN.StunMessage
+SharpTURN.TurnException.TurnException(int code, string reason, SharpSTUN.StunMessage response = null) -> void
+SharpTURN.TurnIcmpEventArgs
+SharpTURN.TurnIcmpEventArgs.Code.get -> byte
+SharpTURN.TurnIcmpEventArgs.Peer.get -> System.Net.IPEndPoint
+SharpTURN.TurnIcmpEventArgs.TurnIcmpEventArgs(System.Net.IPEndPoint peer, byte type, byte code) -> void
+SharpTURN.TurnIcmpEventArgs.Type.get -> byte
+SharpTURN.TurnIndication
+SharpTURN.TurnMessageExtensions
+SharpTURN.TurnMethod
+SharpTURN.TurnPeers
+SharpTURN.TurnServer
+SharpTURN.TurnServer.AllocationCount.get -> int
+SharpTURN.TurnServer.Dispose() -> void
+SharpTURN.TurnServer.ListenDtls(System.Net.IPEndPoint endPoint) -> System.Net.IPEndPoint
+SharpTURN.TurnServer.ListenTcp(System.Net.IPEndPoint endPoint) -> System.Net.IPEndPoint
+SharpTURN.TurnServer.ListenTls(System.Net.IPEndPoint endPoint) -> System.Net.IPEndPoint
+SharpTURN.TurnServer.ListenUdp(System.Net.IPEndPoint endPoint) -> System.Net.IPEndPoint
+SharpTURN.TurnServer.Stun.get -> SharpSTUN.StunServer
+SharpTURN.TurnServer.TurnServer(SharpTURN.TurnServerOptions options = null) -> void
+SharpTURN.TurnServerOptions
+SharpTURN.TurnServerOptions.AdvertisedRelayAddress.get -> System.Net.IPAddress
+SharpTURN.TurnServerOptions.AdvertisedRelayAddress.set -> void
+SharpTURN.TurnServerOptions.AllowPeer.get -> System.Func<System.Net.IPEndPoint, bool>
+SharpTURN.TurnServerOptions.AllowPeer.set -> void
+SharpTURN.TurnServerOptions.AllowUnauthenticated.get -> bool
+SharpTURN.TurnServerOptions.AllowUnauthenticated.set -> void
+SharpTURN.TurnServerOptions.DefaultLifetime.get -> System.TimeSpan
+SharpTURN.TurnServerOptions.DefaultLifetime.set -> void
+SharpTURN.TurnServerOptions.MaxAllocations.get -> int
+SharpTURN.TurnServerOptions.MaxAllocations.set -> void
+SharpTURN.TurnServerOptions.MaxAllocationsPerUser.get -> int
+SharpTURN.TurnServerOptions.MaxAllocationsPerUser.set -> void
+SharpTURN.TurnServerOptions.MaxLifetime.get -> System.TimeSpan
+SharpTURN.TurnServerOptions.MaxLifetime.set -> void
+SharpTURN.TurnServerOptions.MaxPermissionsPerAllocation.get -> int
+SharpTURN.TurnServerOptions.MaxPermissionsPerAllocation.set -> void
+SharpTURN.TurnServerOptions.PortMax.get -> int
+SharpTURN.TurnServerOptions.PortMax.set -> void
+SharpTURN.TurnServerOptions.PortMin.get -> int
+SharpTURN.TurnServerOptions.PortMin.set -> void
+SharpTURN.TurnServerOptions.RelayAddress.get -> System.Net.IPAddress
+SharpTURN.TurnServerOptions.RelayAddress.set -> void
+SharpTURN.TurnServerOptions.RelayAddressV6.get -> System.Net.IPAddress
+SharpTURN.TurnServerOptions.RelayAddressV6.set -> void
+SharpTURN.TurnServerOptions.Stun.get -> SharpSTUN.StunServerOptions
+SharpTURN.TurnServerOptions.Stun.set -> void
+SharpTURN.TurnServerOptions.Trace.get -> System.Action<string>
+SharpTURN.TurnServerOptions.Trace.set -> void
+SharpTURN.TurnServerOptions.TurnServerOptions() -> void
+static readonly SharpTURN.TurnConstants.ChannelLifetime -> System.TimeSpan
+static readonly SharpTURN.TurnConstants.DefaultLifetime -> System.TimeSpan
+static readonly SharpTURN.TurnConstants.MaxLifetime -> System.TimeSpan
+static readonly SharpTURN.TurnConstants.PermissionLifetime -> System.TimeSpan
+static readonly SharpTURN.TurnServer.ChannelLifetime -> System.TimeSpan
+static readonly SharpTURN.TurnServer.PermissionLifetime -> System.TimeSpan
+static SharpTURN.TurnAttributeType.IsKnown(ushort type) -> bool
+static SharpTURN.TurnAttributeType.IsKnownOfTurn(ushort type) -> bool
+static SharpTURN.TurnChannelData.Create(ushort channel, byte[] buffer, int offset, int count, bool padded) -> byte[]
+static SharpTURN.TurnChannelData.Frame(System.Span<byte> destination, ushort channel, int dataLength, bool padded) -> int
+static SharpTURN.TurnChannelData.TryRead(byte[] buffer, int offset, int count, out ushort channel, out int dataOffset, out int dataLength) -> bool
+static SharpTURN.TurnChannelData.Write(System.Span<byte> destination, ushort channel, System.ReadOnlySpan<byte> data, bool padded) -> int
+static SharpTURN.TurnIndication.Frame(System.Span<byte> destination, ushort method, System.Net.IPEndPoint peer, int dataLength, bool dontFragment = false) -> int
+static SharpTURN.TurnIndication.HeaderSize(System.Net.IPEndPoint peer) -> int
+static SharpTURN.TurnIndication.Size(System.Net.IPEndPoint peer, int dataLength, bool dontFragment) -> int
+static SharpTURN.TurnIndication.Write(System.Span<byte> destination, ushort method, System.Net.IPEndPoint peer, System.ReadOnlySpan<byte> data, bool dontFragment = false) -> int
+static SharpTURN.TurnMessageExtensions.AddAddressError(this SharpSTUN.StunMessage message, System.Net.Sockets.AddressFamily family, int code, string reason) -> SharpSTUN.StunMessage
+static SharpTURN.TurnMessageExtensions.AddAddressFamily(this SharpSTUN.StunMessage message, ushort type, System.Net.Sockets.AddressFamily family) -> SharpSTUN.StunMessage
+static SharpTURN.TurnMessageExtensions.AddChannelNumber(this SharpSTUN.StunMessage message, ushort channel) -> SharpSTUN.StunMessage
+static SharpTURN.TurnMessageExtensions.AddEvenPort(this SharpSTUN.StunMessage message, bool reserveNext) -> SharpSTUN.StunMessage
+static SharpTURN.TurnMessageExtensions.AddLifetime(this SharpSTUN.StunMessage message, System.TimeSpan lifetime) -> SharpSTUN.StunMessage
+static SharpTURN.TurnMessageExtensions.AddRequestedTransport(this SharpSTUN.StunMessage message, byte protocol = 17) -> SharpSTUN.StunMessage
+static SharpTURN.TurnMessageExtensions.GetAddressError(this SharpSTUN.StunMessage message) -> (System.Net.Sockets.AddressFamily Family, int Code, string Reason)?
+static SharpTURN.TurnMessageExtensions.GetAddressFamily(this SharpSTUN.StunMessage message, ushort type) -> System.Net.Sockets.AddressFamily?
+static SharpTURN.TurnMessageExtensions.GetChannelNumber(this SharpSTUN.StunMessage message) -> ushort?
+static SharpTURN.TurnMessageExtensions.GetEvenPort(this SharpSTUN.StunMessage message) -> bool?
+static SharpTURN.TurnMessageExtensions.GetIcmp(this SharpSTUN.StunMessage message) -> (byte Type, byte Code)?
+static SharpTURN.TurnMessageExtensions.GetLifetime(this SharpSTUN.StunMessage message) -> System.TimeSpan?
+static SharpTURN.TurnMessageExtensions.GetRequestedTransport(this SharpSTUN.StunMessage message) -> byte?
+static SharpTURN.TurnPeers.IsPublic(System.Net.IPAddress address) -> bool
+static SharpTURN.TurnPeers.IsPublic(System.Net.IPEndPoint endPoint) -> bool

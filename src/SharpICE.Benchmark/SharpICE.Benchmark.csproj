@@ -12,8 +12,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SharpICE\SharpICE.csproj" />
-    <ProjectReference Include="..\SharpStun\SharpStun.csproj" />
-    <ProjectReference Include="..\SharpTurn\SharpTurn.csproj" />
+    <ProjectReference Include="..\SharpSTUN\SharpSTUN.csproj" />
+    <ProjectReference Include="..\SharpTURN\SharpTURN.csproj" />
   </ItemGroup>
 
 </Project>
