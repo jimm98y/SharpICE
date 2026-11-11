@@ -152,6 +152,12 @@ namespace SharpICE
         public int MaxTcpConnections { get; set; } = 32;
 
         /// <summary>
+        /// The connections of ICE-TCP one source address may hold at once, established or in their TLS handshake, so one
+        /// host can't take every slot of <see cref="MaxTcpConnections"/>; 0 for no limit.
+        /// </summary>
+        public int MaxTcpConnectionsPerAddress { get; set; } = 16;
+
+        /// <summary>
         /// How long a connection to a passive candidate has to make a pair of its checks: past it, one of none is closed, as
         /// anyone may connect.
         /// </summary>

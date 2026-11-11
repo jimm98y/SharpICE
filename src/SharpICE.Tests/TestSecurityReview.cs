@@ -422,6 +422,61 @@ namespace SharpICE.Tests
         }
 
         [TestMethod]
+        public async Task CapsThePassiveConnectionsOfOneAddress()
+        {
+            // one host opens more connections than its address may hold: those past the cap are closed at once, while the
+            // ones within it stay open (for TcpCheckTimeout)
+            var options = new IceAgentOptions
+            {
+                Role = IceRole.Controlled,
+                IncludeLoopback = true,
+                AddressFilter = address => IPAddress.IsLoopback(address) && address.AddressFamily == AddressFamily.InterNetwork,
+                IncludeTcp = true,
+                MaxTcpConnectionsPerAddress = 2,
+                TcpCheckTimeout = TimeSpan.FromSeconds(30),
+            };
+            using var agent = new IceAgent(options);
+            await agent.GatherCandidatesAsync();
+            agent.SetRemoteCredentials("peer", "peerpasswordpeerpassword");
+            agent.Start();
+            var passive = agent.LocalCandidates.First(c => c.IsTcp && c.TcpType == IceCandidate.TcpPassive);
+
+            var clients = new List<TcpClient>();
+            try
+            {
+                var closed = new List<Task<bool>>();
+                for (int i = 0; i < 4; i++)
+                {
+                    var client = new TcpClient(AddressFamily.InterNetwork);
+                    clients.Add(client);
+                    await client.ConnectAsync(IPAddress.Loopback, passive.Port);
+                    await Task.Delay(200); // accepted in order
+                    var stream = client.GetStream();
+                    closed.Add(Task.Run(async () =>
+                    {
+                        try
+                        {
+                            return await stream.ReadAsync(new byte[16], 0, 16) == 0;
+                        }
+                        catch (IOException)
+                        {
+                            return true;
+                        }
+                    }));
+                }
+                await Task.Delay(TimeSpan.FromSeconds(2));
+                Assert.IsFalse(closed[0].IsCompleted, "the first connection of the address stays");
+                Assert.IsFalse(closed[1].IsCompleted, "the second connection of the address stays");
+                Assert.IsTrue(closed[2].IsCompleted && closed[3].IsCompleted, "those past the cap are closed");
+            }
+            finally
+            {
+                foreach (var client in clients)
+                    client.Dispose();
+            }
+        }
+
+        [TestMethod]
         public async Task SwitchesRoleOnceOfSeveral487sToChecksOfOneRole()
         {
             // two checks in flight as controlling, both answered 487: the agent switches to controlled once, rather than

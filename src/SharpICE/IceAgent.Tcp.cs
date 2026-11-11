@@ -58,6 +58,8 @@ namespace SharpICE
         // the connections to passive candidates being made - of a TLS handshake, or of a relay's ConnectionBind - of the
         // connections' limit too
         private int _pendingConnections;
+        // the pending connections of each source address, counted with the established ones against MaxTcpConnectionsPerAddress
+        private readonly Dictionary<IPAddress, int> _pendingFrom = new Dictionary<IPAddress, int>();
 
         private void GatherTcp(List<IPAddress> addresses, List<IceCandidate> gathered) => GatherStream(addresses, gathered, false);
 
@@ -141,6 +143,44 @@ namespace SharpICE
             }
         }
 
+        // Under the lock: whether a source address has MaxTcpConnectionsPerAddress connections, established or pending, already.
+        private bool IsFullFrom(IPAddress address)
+        {
+            if (_options.MaxTcpConnectionsPerAddress <= 0)
+                return false;
+            address = Unmapped(address);
+            _pendingFrom.TryGetValue(address, out int count);
+            foreach (var connection in _connections)
+            {
+                var remote = connection.RemoteEndPoint?.Address;
+                if (remote != null && Unmapped(remote).Equals(address))
+                    count++;
+            }
+            return count >= _options.MaxTcpConnectionsPerAddress;
+        }
+
+        private static IPAddress Unmapped(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+        private void AddPending(IPAddress address)
+        {
+            address = Unmapped(address);
+            _pendingConnections++;
+            _pendingFrom[address] = _pendingFrom.TryGetValue(address, out int count) ? count + 1 : 1;
+        }
+
+        private void RemovePending(IPAddress address)
+        {
+            address = Unmapped(address);
+            _pendingConnections--;
+            if (_pendingFrom.TryGetValue(address, out int count))
+            {
+                if (count <= 1)
+                    _pendingFrom.Remove(address);
+                else
+                    _pendingFrom[address] = count - 1;
+            }
+        }
+
         // a peer's connection to the relayed address of a passive candidate of TCP: its data connection of the agent's, of a
         // ConnectionBind, as a connection to a passive candidate of the agent's own is
         private async Task AcceptRelayedAsync(LocalBase local, TurnConnectionAttemptEventArgs attempt)
@@ -149,13 +189,13 @@ namespace SharpICE
             {
                 if (_closed)
                     return;
-                if (_connections.Count + _pendingConnections >= _options.MaxTcpConnections)
+                if (_connections.Count + _pendingConnections >= _options.MaxTcpConnections || IsFullFrom(attempt.Peer.Address))
                 {
                     // left: the server closes it of no ConnectionBind in 30 seconds
-                    Trace($"Connection from {attempt.Peer} to {local.EndPoint} refused: {_options.MaxTcpConnections} already");
+                    Trace($"Connection from {attempt.Peer} to {local.EndPoint} refused: {_options.MaxTcpConnections} already, or {_options.MaxTcpConnectionsPerAddress} of its address");
                     return;
                 }
-                _pendingConnections++;
+                AddPending(attempt.Peer.Address);
             }
             IceTcpConnection connection = null;
             try
@@ -169,7 +209,7 @@ namespace SharpICE
             }
             lock (_sync)
             {
-                _pendingConnections--;
+                RemovePending(attempt.Peer.Address);
                 if (connection != null && !_closed)
                 {
                     _connections.Add(connection);
@@ -316,6 +356,7 @@ namespace SharpICE
                 if (local.Candidate.IsTls)
                 {
                     // of TLS, its handshake of a task of its own, that a peer slow of it holds up no other
+                    IPAddress source;
                     lock (_sync)
                     {
                         if (_closed)
@@ -323,15 +364,16 @@ namespace SharpICE
                             client.Dispose();
                             return;
                         }
-                        if (_connections.Count + _pendingConnections >= _options.MaxTcpConnections)
+                        source = ((IPEndPoint)client.Client.RemoteEndPoint).Address;
+                        if (_connections.Count + _pendingConnections >= _options.MaxTcpConnections || IsFullFrom(source))
                         {
-                            Trace($"Connection from {client.Client.RemoteEndPoint} refused: {_options.MaxTcpConnections} already");
+                            Trace($"Connection from {client.Client.RemoteEndPoint} refused: {_options.MaxTcpConnections} already, or {_options.MaxTcpConnectionsPerAddress} of its address");
                             client.Dispose();
                             continue;
                         }
-                        _pendingConnections++;
+                        AddPending(source);
                     }
-                    _ = AcceptTlsAsync(local, client);
+                    _ = AcceptTlsAsync(local, client, source);
                     continue;
                 }
 
@@ -343,9 +385,9 @@ namespace SharpICE
                         connection.Dispose();
                         return;
                     }
-                    if (_connections.Count + _pendingConnections >= _options.MaxTcpConnections)
+                    if (_connections.Count + _pendingConnections >= _options.MaxTcpConnections || IsFullFrom(connection.RemoteEndPoint.Address))
                     {
-                        Trace($"Connection from {connection.RemoteEndPoint} refused: {_options.MaxTcpConnections} already");
+                        Trace($"Connection from {connection.RemoteEndPoint} refused: {_options.MaxTcpConnections} already, or {_options.MaxTcpConnectionsPerAddress} of its address");
                         connection.Dispose();
                         continue;
                     }
@@ -364,7 +406,7 @@ namespace SharpICE
 
         // a connection to a passive candidate of TLS: its handshake, of the agent's server, done in the time a connection has
         // to make a pair of its checks - else closed, as anyone may connect
-        private async Task AcceptTlsAsync(LocalBase local, TcpClient client)
+        private async Task AcceptTlsAsync(LocalBase local, TcpClient client, IPAddress source)
         {
             IceTcpConnection connection = null;
             try
@@ -384,7 +426,7 @@ namespace SharpICE
 
             lock (_sync)
             {
-                _pendingConnections--;
+                RemovePending(source);
                 if (connection != null && !_closed)
                 {
                     _connections.Add(connection);
