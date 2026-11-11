@@ -260,5 +260,222 @@ namespace SharpICE.Tests
                 sockets.ForEach(s => s.Dispose());
             }
         }
+
+        [TestMethod]
+        public async Task ExemptsOnlyARelayOfTheSameProtocolOnItsOwnAddress()
+        {
+            // relays on a host address: a TCP relay's port is no way to a UDP service of the host on that port, nor a UDP
+            // relay's port to a TCP one
+            var host = HostAddress();
+            if (host == null)
+                Assert.Inconclusive("No address of an interface of this host's but the loopback.");
+            var options = TurnOptions(peer => true);
+            options.RelayAddress = host;
+            using var server = new TurnServer(options);
+            var udp = server.ListenUdp(new IPEndPoint(IPAddress.Loopback, 0));
+            var tcp = server.ListenTcp(new IPEndPoint(IPAddress.Loopback, 0));
+
+            using var tcpClient = new TurnClient(ClientOptions());
+            await tcpClient.ConnectAsync("turn:127.0.0.1:" + tcp.Port + "?transport=tcp");
+            await tcpClient.AllocateAsync(new TurnAllocateOptions { Tcp = true });
+            using var udpClient = new TurnClient(ClientOptions());
+            await udpClient.ConnectAsync("turn:127.0.0.1:" + udp.Port);
+            await udpClient.AllocateAsync();
+            using var otherUdpClient = new TurnClient(ClientOptions());
+            await otherUdpClient.ConnectAsync("turn:127.0.0.1:" + udp.Port);
+            await otherUdpClient.AllocateAsync();
+
+            var tcpRelay = new IPEndPoint(host, tcpClient.RelayedEndPoint.Port);
+            var udpRelay = new IPEndPoint(host, otherUdpClient.RelayedEndPoint.Port);
+
+            // UDP to a TCP relay's port: refused
+            var refused = await Assert.ThrowsExactlyAsync<TurnException>(() => udpClient.BindChannelAsync(tcpRelay));
+            Assert.AreEqual(TurnErrorCode.Forbidden, refused.Code, "UDP to the port of a TCP relay");
+            // UDP to another allocation's UDP relay: allowed, as two clients of one server relay to each other
+            await udpClient.BindChannelAsync(udpRelay);
+
+            // TCP (Connect) to a UDP relay's port: refused
+            await tcpClient.CreatePermissionAsync(host);
+            var connect = await Assert.ThrowsExactlyAsync<TurnException>(() => tcpClient.ConnectPeerAsync(udpRelay));
+            Assert.AreEqual(TurnErrorCode.Forbidden, connect.Code, "TCP to the port of a UDP relay");
+        }
+
+        [TestMethod]
+        public async Task ClosesARelayedIceTcpConnectionWhosePeerReadsNothing()
+        {
+            // a connection of a stream - as of a TURN relay's data connection - to a peer that never reads: a write ends,
+            // of the write timeout, and the connection with it, rather than blocking for ever
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            try
+            {
+                var accepting = listener.AcceptTcpClientAsync();
+                var client = new TcpClient(AddressFamily.InterNetwork);
+                await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
+                using var silent = await accepting;
+                using var connection = new IceTcpConnection(client.GetStream(), (IPEndPoint)client.Client.LocalEndPoint, (IPEndPoint)client.Client.RemoteEndPoint, client);
+                byte[] packet = new byte[60000];
+                var sending = Task.Run(() =>
+                {
+                    while (connection.Send(packet, 0, packet.Length))
+                    {
+                    }
+                });
+                var done = await Task.WhenAny(sending, Task.Delay(TimeSpan.FromSeconds(60)));
+                Assert.AreSame(sending, done, "the write ended, of its timeout");
+                Assert.IsFalse(connection.Send(packet, 0, 10), "the connection closed");
+            }
+            finally
+            {
+                listener.Stop();
+            }
+        }
+
+        [TestMethod]
+        public async Task KeepsRoomForSignalledCandidatesWhenChecksAreReplayed()
+        {
+            // checks replayed from many sources fill the peer reflexive candidates' own cap, not that of the signalled ones
+            var options = new IceAgentOptions
+            {
+                Role = IceRole.Controlled,
+                IncludeLoopback = true,
+                AddressFilter = address => IPAddress.IsLoopback(address) && address.AddressFamily == AddressFamily.InterNetwork,
+                MaxRemoteCandidates = 3,
+            };
+            using var agent = new IceAgent(options);
+            await agent.GatherCandidatesAsync();
+            agent.SetRemoteCredentials("peer", "peerpasswordpeerpassword");
+            agent.Start();
+            var target = new IPEndPoint(IPAddress.Loopback, agent.LocalCandidates.Single().Port);
+            var key = StunMessage.ShortTermKey(agent.LocalPassword);
+            var check = new StunMessage(StunMethod.Binding, StunMessageClass.Request).AddString(StunAttributeType.Username, agent.LocalUfrag + ":peer")
+                .AddUInt32(StunAttributeType.Priority, 1).AddUInt64(StunAttributeType.IceControlling, 1).ToBytes(key, true);
+            var sockets = Enumerable.Range(0, 10).Select(_ =>
+            {
+                var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                return socket;
+            }).ToList();
+            try
+            {
+                // one captured check, replayed from each source
+                foreach (var socket in sockets)
+                    socket.SendTo(check, target);
+                await Task.Delay(500);
+                Assert.IsTrue(agent.RemoteCandidates.Count(c => c.Type == IceCandidateType.PeerReflexive) <= 3);
+                for (int i = 0; i < 3; i++)
+                    Assert.IsTrue(agent.AddRemoteCandidate($"candidate:{i} 1 udp 2130706431 192.0.2.{10 + i} 50000 typ host"), "signalled " + i);
+                Assert.IsFalse(agent.AddRemoteCandidate("candidate:9 1 udp 2130706431 192.0.2.99 50000 typ host"), "past the signalled cap");
+            }
+            finally
+            {
+                sockets.ForEach(s => s.Dispose());
+            }
+        }
+
+        [TestMethod]
+        public async Task ClosesAPassiveConnectionOfAReplayedCheck()
+        {
+            // a check over a connection to a passive candidate, of the agent's credentials, from someone who never answers the
+            // agent's own check: the connection is closed once that check has had its time
+            var options = new IceAgentOptions
+            {
+                Role = IceRole.Controlled,
+                IncludeLoopback = true,
+                AddressFilter = address => IPAddress.IsLoopback(address) && address.AddressFamily == AddressFamily.InterNetwork,
+                IncludeTcp = true,
+                TcpCheckTimeout = TimeSpan.FromSeconds(1),
+            };
+            using var agent = new IceAgent(options);
+            await agent.GatherCandidatesAsync();
+            agent.SetRemoteCredentials("peer", "peerpasswordpeerpassword");
+            agent.Start();
+            var passive = agent.LocalCandidates.First(c => c.IsTcp && c.TcpType == IceCandidate.TcpPassive);
+            var key = StunMessage.ShortTermKey(agent.LocalPassword);
+            byte[] check = new StunMessage(StunMethod.Binding, StunMessageClass.Request).AddString(StunAttributeType.Username, agent.LocalUfrag + ":peer")
+                .AddUInt32(StunAttributeType.Priority, 1).AddUInt64(StunAttributeType.IceControlling, 1).ToBytes(key, true);
+
+            using var client = new TcpClient(AddressFamily.InterNetwork);
+            await client.ConnectAsync(IPAddress.Loopback, passive.Port);
+            var stream = client.GetStream();
+            byte[] frame = new byte[2 + check.Length];
+            frame[0] = (byte)(check.Length >> 8);
+            frame[1] = (byte)check.Length;
+            Buffer.BlockCopy(check, 0, frame, 2, check.Length);
+            await stream.WriteAsync(frame, 0, frame.Length);
+
+            // what the agent sends - its response, its own check - is read and left unanswered, until it closes
+            byte[] buffer = new byte[4096];
+            var reading = Task.Run(async () =>
+            {
+                try
+                {
+                    while (await stream.ReadAsync(buffer, 0, buffer.Length) > 0)
+                    {
+                    }
+                }
+                catch (IOException)
+                {
+                }
+            });
+            Assert.AreSame(reading, await Task.WhenAny(reading, Task.Delay(TimeSpan.FromSeconds(20))), "the agent closed the connection");
+        }
+
+        [TestMethod]
+        public async Task SwitchesRoleOnceOfSeveral487sToChecksOfOneRole()
+        {
+            // two checks in flight as controlling, both answered 487: the agent switches to controlled once, rather than
+            // back and forth with each response
+            var options = new IceAgentOptions
+            {
+                Role = IceRole.Controlling,
+                IncludeLoopback = true,
+                AddressFilter = address => IPAddress.IsLoopback(address) && address.AddressFamily == AddressFamily.InterNetwork,
+            };
+            using var agent = new IceAgent(options);
+            await agent.GatherCandidatesAsync();
+            const string peerPassword = "peerpasswordpeerpassword";
+            agent.SetRemoteCredentials("peer", peerPassword);
+            var peerKey = StunMessage.ShortTermKey(peerPassword);
+            var sockets = Enumerable.Range(0, 2).Select(_ =>
+            {
+                var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                socket.ReceiveTimeout = 5000;
+                return socket;
+            }).ToList();
+            try
+            {
+                // of foundations of their own, so that neither pair is frozen behind the other
+                for (int i = 0; i < sockets.Count; i++)
+                    Assert.IsTrue(agent.AddRemoteCandidate($"candidate:{i + 1} 1 udp 2130706431 127.0.0.1 {((IPEndPoint)sockets[i].LocalEndPoint).Port} typ host"));
+                agent.Start();
+
+                // each check, held until both have come
+                var checks = new List<(Socket Socket, StunMessage Request, EndPoint From)>();
+                foreach (var socket in sockets)
+                {
+                    byte[] buffer = new byte[1500];
+                    EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+                    int count = socket.ReceiveFrom(buffer, ref from);
+                    var request = StunMessage.Parse(buffer, 0, count);
+                    Assert.IsNotNull(request);
+                    Assert.IsTrue(request.HasAttribute(StunAttributeType.IceControlling));
+                    checks.Add((socket, request, from));
+                }
+                foreach (var (socket, request, from) in checks)
+                {
+                    var error = new StunMessage(StunMethod.Binding, StunMessageClass.ErrorResponse) { TransactionId = request.TransactionId }
+                        .AddError(StunErrorCode.RoleConflict, "Role Conflict");
+                    socket.SendTo(error.ToBytes(peerKey, true), from);
+                }
+                await Task.Delay(500);
+                Assert.AreEqual(IceRole.Controlled, agent.Role);
+            }
+            finally
+            {
+                sockets.ForEach(s => s.Dispose());
+            }
+        }
     }
 }

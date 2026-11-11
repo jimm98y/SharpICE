@@ -416,17 +416,37 @@ namespace SharpICE
             }
         }
 
-        // a connection anyone made: of no pair of its checks - authenticated, each - in time, closed
+        // A connection anyone may make. It is closed unless a pair of it is checked in time (an authenticated check from
+        // the peer), and then unless a check of the agent's on it succeeds - a check replayed over a connection pairs it,
+        // but only the peer can answer the agent's own. Before the agent starts its checks, and of a lite agent, a pair
+        // is enough.
         private async Task CloseUnpairedAsync(IceTcpConnection connection)
         {
-            await Task.Delay(_options.TcpCheckTimeout).ConfigureAwait(false);
-            bool paired;
-            lock (_sync)
-                paired = _closed || !_connections.Contains(connection) || _pairs.Any(p => p.Connection == connection) || SelectedPair?.Connection == connection;
-            if (!paired)
+            const int Rounds = 4;
+            for (int round = 0; round < Rounds; round++)
             {
-                Trace($"Connection from {connection.RemoteEndPoint} closed: no check of it in {_options.TcpCheckTimeout.TotalSeconds}s");
+                await Task.Delay(_options.TcpCheckTimeout).ConfigureAwait(false);
+                bool keep, paired;
+                lock (_sync)
+                {
+                    if (_closed || !_connections.Contains(connection) || SelectedPair?.Connection == connection)
+                        return;
+                    var pairs = _pairs.Where(p => p.Connection == connection).ToList();
+                    paired = pairs.Count > 0;
+                    // a lite agent sends no checks of its own: a pair, of the peer's authenticated check, is all it has
+                    keep = pairs.Any(p => p.State == IceCandidatePairState.Succeeded) || IsLite && paired;
+                    // a pair still being checked, or waiting for checks to begin, is given another round
+                    bool pending = pairs.Any(p => p.State != IceCandidatePairState.Failed) && (round < Rounds - 1 || !_started);
+                    if (!keep && (round == 0 ? paired : pending))
+                        continue;
+                }
+                if (keep)
+                    return;
+                Trace(paired
+                    ? $"Connection from {connection.RemoteEndPoint} closed: no check of the agent's succeeded on it"
+                    : $"Connection from {connection.RemoteEndPoint} closed: no check of it in {_options.TcpCheckTimeout.TotalSeconds}s");
                 connection.Dispose();
+                return;
             }
         }
 
@@ -551,6 +571,14 @@ namespace SharpICE
         private readonly Stream _stream;
         private readonly IDisposable _owner;
         private readonly object _writing = new object();
+        private int _disposed;
+
+        /// <summary>How long a write may take before the connection is closed: a peer that reads nothing ends it.</summary>
+        internal static TimeSpan WriteTimeout = TimeSpan.FromSeconds(5);
+
+        // Closes the connection when a write overruns WriteTimeout. Closing the socket ends the blocked write, whatever the
+        // stream (TCP, TLS, or a TURN relay's data connection), so no thread - the agent's Tick included - is held longer.
+        private Timer _writeDeadline;
 
         /// <summary>
         /// A connection of a stream of what else - of a relay of TCP, its data connection to the server - of the addresses the
@@ -570,7 +598,7 @@ namespace SharpICE
             _client = client;
             _client.NoDelay = true;
             // a write to a peer that reads nothing ends, rather than holding the thread it blocks
-            _client.SendTimeout = 5000;
+            _client.SendTimeout = (int)WriteTimeout.TotalMilliseconds;
             _stream = tls ?? client.GetStream();
             IsTls = tls != null;
             LocalEndPoint = IceAgent.Normalize((IPEndPoint)client.Client.LocalEndPoint);
@@ -598,11 +626,26 @@ namespace SharpICE
             try
             {
                 lock (_writing)
-                    _stream.Write(frame, 0, 2 + count);
+                {
+                    if (Volatile.Read(ref _disposed) != 0)
+                        return false;
+                    _writeDeadline ??= new Timer(_ => Dispose(), null, Timeout.Infinite, Timeout.Infinite);
+                    _writeDeadline.Change(WriteTimeout, Timeout.InfiniteTimeSpan);
+                    try
+                    {
+                        _stream.Write(frame, 0, 2 + count);
+                    }
+                    finally
+                    {
+                        _writeDeadline.Change(Timeout.Infinite, Timeout.Infinite);
+                    }
+                }
                 return true;
             }
-            catch (Exception ex) when (ex is IOException || ex is ObjectDisposedException || ex is SocketException)
+            catch (Exception ex) when (ex is IOException || ex is ObjectDisposedException || ex is SocketException || ex is InvalidOperationException)
             {
+                // a frame written in part leaves the stream out of step: the connection is of no further use
+                Dispose();
                 return false;
             }
             finally
@@ -660,6 +703,9 @@ namespace SharpICE
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+            _writeDeadline?.Dispose();
             _stream.Dispose();
             _client?.Dispose();
             _owner?.Dispose();

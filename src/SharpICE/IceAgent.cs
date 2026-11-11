@@ -152,6 +152,45 @@ namespace SharpICE
         private readonly List<IceCandidate> _localCandidates = new List<IceCandidate>();
         private readonly List<IceCandidate> _remoteCandidates = new List<IceCandidate>();
         private readonly List<IceCandidatePair> _pairs = new List<IceCandidatePair>();
+
+        // of the foundations of peer reflexive candidates: one of each, as some may have been dropped
+        private int _peerReflexiveFoundations;
+
+        // the cap of peer reflexive candidates, apart from that of the signalled ones
+        private int MaxPeerReflexive => Math.Max(1, Math.Min(_options.MaxRemoteCandidates, 16));
+
+        // under the lock
+        private int PeerReflexiveCount => _remoteCandidates.Count(c => c.Type == IceCandidateType.PeerReflexive);
+
+        private int SignalledCount => _remoteCandidates.Count - PeerReflexiveCount;
+
+        // Under the lock: drops the oldest peer reflexive candidate none of whose pairs succeeded, is being checked, is
+        // nominated or selected, with its pairs, triggered checks and connections. False when there is none.
+        private bool EvictPeerReflexive()
+        {
+            foreach (var candidate in _remoteCandidates)
+            {
+                if (candidate.Type != IceCandidateType.PeerReflexive)
+                    continue;
+                var pairs = _pairs.Where(p => p.Remote == candidate).ToList();
+                if (pairs.Any(p => p.State == IceCandidatePairState.Succeeded || p.State == IceCandidatePairState.InProgress || p.Nominated || p == SelectedPair))
+                    continue;
+                _remoteCandidates.Remove(candidate);
+                foreach (var pair in pairs)
+                {
+                    _pairs.Remove(pair);
+                    _triggered.Remove(pair);
+                    foreach (var key in _transactions.Where(t => t.Value == pair).Select(t => t.Key).ToList())
+                        _transactions.Remove(key);
+                    // a connection of the peer's of no other pair: closed (its receive loop ends it, of the agent's)
+                    if (pair.Connection != null && !_pairs.Any(p => p.Connection == pair.Connection))
+                        pair.Connection.Dispose();
+                }
+                Trace($"Peer reflexive {candidate} dropped, for another");
+                return true;
+            }
+            return false;
+        }
         private readonly LinkedList<IceCandidatePair> _triggered = new LinkedList<IceCandidatePair>();
         private readonly Dictionary<StunTransactionKey, IceCandidatePair> _transactions = new Dictionary<StunTransactionKey, IceCandidatePair>();
         private readonly List<IceTcpConnection> _connections = new List<IceTcpConnection>();
@@ -846,8 +885,9 @@ namespace SharpICE
                 return false;
             lock (_sync)
             {
-                // of a peer that signals without end: each candidate pairs, and is checked
-                if (_remoteCandidates.Count + _resolving >= _options.MaxRemoteCandidates)
+                // of a peer that signals without end: each candidate pairs, and is checked. Peer reflexive candidates are
+                // counted apart, so that ones learnt of replayed checks can't crowd out the signalled ones.
+                if (SignalledCount + _resolving >= _options.MaxRemoteCandidates)
                 {
                     Trace($"Candidate left out, of {_options.MaxRemoteCandidates} already: {candidate}");
                     return false;
@@ -1311,6 +1351,7 @@ namespace SharpICE
             request.AddString(StunAttributeType.Username, RemoteUfrag + ":" + LocalUfrag);
             // the priority of the peer reflexive candidate the check may make of the pair's local one (RFC 8445 7.1.1)
             request.AddUInt32(StunAttributeType.Priority, IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, pair.Local.LocalPreference, IceCandidate.RtpComponent, pair.Local.Transport));
+            pair.CheckRole = Role;
             if (Role == IceRole.Controlling)
             {
                 request.AddUInt64(StunAttributeType.IceControlling, TieBreaker);
@@ -1517,16 +1558,17 @@ namespace SharpICE
                 var remote = _remoteCandidates.FirstOrDefault(c => (tcp ? IceCandidate.SameTransport(c, local.Candidate) : c.IsUdp) && Equals(c.EndPoint, from));
                 if (remote == null)
                 {
-                    // of the peer's candidates no more than the signalled ones take, learnt of checks of sources it may spoof
-                    // or of connections it makes again and again: each a pair, and a check of it, of the agent's
-                    if (_remoteCandidates.Count + _resolving >= _options.MaxRemoteCandidates)
+                    // Peer reflexive candidates come of checks whose source may be spoofed, or replayed from new sources, or
+                    // of connections made again and again; each is a pair and a check. They have a cap of their own, and once
+                    // it is reached the oldest that has done nothing yet makes way, so replays can't keep out a real one.
+                    if (PeerReflexiveCount >= MaxPeerReflexive && !EvictPeerReflexive())
                     {
-                        Trace($"Peer reflexive candidate of {from} left out, of {_options.MaxRemoteCandidates} already");
+                        Trace($"Peer reflexive candidate of {from} left out, of {MaxPeerReflexive} already");
                         return;
                     }
                     remote = new IceCandidate
                     {
-                        Foundation = "p" + (_remoteCandidates.Count + 1).ToString(CultureInfo.InvariantCulture),
+                        Foundation = "p" + (++_peerReflexiveFoundations).ToString(CultureInfo.InvariantCulture),
                         Component = IceCandidate.RtpComponent,
                         Transport = transport,
                         Priority = request.Priority ?? IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, 0, IceCandidate.RtpComponent, transport),
@@ -1653,11 +1695,15 @@ namespace SharpICE
                     var error = response.Error;
                     if (error?.Code == StunErrorCode.RoleConflict)
                     {
-                        // RFC 8445 7.2.5.1: the role the request was not of, and the check again
-                        SwitchRole(Role == IceRole.Controlling ? IceRole.Controlled : IceRole.Controlling);
+                        // RFC 8445 7.2.5.1: the role opposite to the one the request was sent in - unless another 487
+                        // switched it already - and the check again
+                        if (Role == pair.CheckRole)
+                        {
+                            SwitchRole(pair.CheckRole == IceRole.Controlling ? IceRole.Controlled : IceRole.Controlling);
+                            Trace($"Role conflict: switched to {Role}");
+                        }
                         pair.State = IceCandidatePairState.Waiting;
                         _triggered.AddFirst(pair);
-                        Trace($"Role conflict: switched to {Role}");
                     }
                     else
                     {

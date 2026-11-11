@@ -89,6 +89,10 @@ namespace SharpICE
         // of TCP: the connection the checks and the data go over (RFC 6544)
         internal IceTcpConnection Connection;
 
+        // the role the agent was in when it sent the pair's current check: a 487 to it is acted on only if the agent is still
+        // in that role (RFC 8445 7.2.5.1)
+        internal IceRole CheckRole;
+
         // whether the peer authenticated of the pair - a request of its, or a response to a check of ours - that its data is
         // taken of the pair's address
         internal bool Validated;

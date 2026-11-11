@@ -128,13 +128,30 @@ namespace SharpStun
             => Task.Factory.StartNew(call, cancellationToken, TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
 
         /// <summary>
-        /// BouncyCastle's stream of a connection, of a read and a write at once: its async calls of its blocking ones, each of
-        /// a thread of its own - as Stream's own run one at a time, a read waiting for data holding up every write - as
-        /// BouncyCastle reads of one thread and writes of another.
+        /// BouncyCastle's stream of a connection, made usable from async code. BouncyCastle reads and writes blocking, and
+        /// can read on one thread while it writes on another; Stream's default async methods would run one call at a time,
+        /// so a read waiting for data would hold up every write.
+        /// <list type="bullet">
+        /// <item>Reads: one long-lived thread per connection reads ahead into a bounded buffer, which reads take from. No
+        /// thread is started per read, and no pool thread waits for the peer.</item>
+        /// <item>Writes run on the caller's thread: they block only while the socket's send buffer is full, for no longer
+        /// than the socket's send timeout where the owner sets one (as the STUN/TURN server and ICE-TCP do).</item>
+        /// </list>
         /// </summary>
         private sealed class BlockingStream : Stream
         {
+            // how much is read ahead at most; past it the reading thread waits, and TCP pushes back on the peer
+            private const int MaxBuffered = 256 * 1024;
+
             private readonly Stream _inner;
+            private readonly object _sync = new object();
+            private readonly LinkedList<ArraySegment<byte>> _chunks = new LinkedList<ArraySegment<byte>>();
+            private int _buffered;
+            private bool _ended;
+            private Exception _error;
+            private bool _disposed;
+            private Thread _reader;
+            private TaskCompletionSource<bool> _available;
 
             public BlockingStream(Stream inner) => _inner = inner;
 
@@ -144,25 +161,172 @@ namespace SharpStun
             public override long Length => throw new NotSupportedException();
             public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
 
-            public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+            // under the lock: the reading thread, started on the first read
+            private void StartReader()
+            {
+                if (_reader != null || _disposed)
+                    return;
+                _reader = new Thread(ReadLoop) { IsBackground = true, Name = "BouncyCastle TLS reader" };
+                _reader.Start();
+            }
+
+            private void ReadLoop()
+            {
+                byte[] buffer = new byte[16 * 1024];
+                Exception error = null;
+                try
+                {
+                    while (true)
+                    {
+                        int count = _inner.Read(buffer, 0, buffer.Length);
+                        if (count <= 0)
+                            break;
+                        byte[] chunk = new byte[count];
+                        Buffer.BlockCopy(buffer, 0, chunk, 0, count);
+                        TaskCompletionSource<bool> available;
+                        lock (_sync)
+                        {
+                            _chunks.AddLast(new ArraySegment<byte>(chunk));
+                            _buffered += count;
+                            available = Signal();
+                        }
+                        available?.TrySetResult(true);
+                        lock (_sync)
+                        {
+                            while (_buffered >= MaxBuffered && !_disposed)
+                                Monitor.Wait(_sync);
+                            if (_disposed)
+                                return;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+                TaskCompletionSource<bool> waiting;
+                lock (_sync)
+                {
+                    _ended = true;
+                    _error = error;
+                    waiting = Signal();
+                }
+                waiting?.TrySetResult(true);
+            }
+
+            // under the lock: wakes the readers, the async one by what it returns, to be completed out of the lock
+            private TaskCompletionSource<bool> Signal()
+            {
+                var available = _available;
+                _available = null;
+                Monitor.PulseAll(_sync);
+                return available;
+            }
+
+            // under the lock: what is buffered copied out; 0 at the end; -1 of nothing yet
+            private int Take(byte[] buffer, int offset, int count)
+            {
+                if (_disposed)
+                    throw new ObjectDisposedException(nameof(BlockingStream));
+                if (_chunks.Count == 0)
+                {
+                    if (!_ended)
+                        return -1;
+                    if (_error != null)
+                        throw new IOException("The TLS connection failed: " + _error.Message, _error);
+                    return 0;
+                }
+                int taken = 0;
+                while (taken < count && _chunks.Count > 0)
+                {
+                    var chunk = _chunks.First.Value;
+                    int n = Math.Min(count - taken, chunk.Count);
+                    Buffer.BlockCopy(chunk.Array, chunk.Offset, buffer, offset + taken, n);
+                    taken += n;
+                    if (n < chunk.Count)
+                        _chunks.First.Value = new ArraySegment<byte>(chunk.Array, chunk.Offset + n, chunk.Count - n);
+                    else
+                        _chunks.RemoveFirst();
+                }
+                _buffered -= taken;
+                // the reading thread, if it waits for room
+                Monitor.PulseAll(_sync);
+                return taken;
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                if (count == 0)
+                    return 0;
+                lock (_sync)
+                {
+                    StartReader();
+                    while (true)
+                    {
+                        int taken = Take(buffer, offset, count);
+                        if (taken >= 0)
+                            return taken;
+                        Monitor.Wait(_sync);
+                    }
+                }
+            }
+
+            public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            {
+                if (count == 0)
+                    return 0;
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    Task available;
+                    lock (_sync)
+                    {
+                        StartReader();
+                        int taken = Take(buffer, offset, count);
+                        if (taken >= 0)
+                            return taken;
+                        _available ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        available = _available.Task;
+                    }
+                    if (cancellationToken.CanBeCanceled)
+                    {
+                        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        using (cancellationToken.Register(() => cancelled.TrySetCanceled(cancellationToken)))
+                            await (await Task.WhenAny(available, cancelled.Task).ConfigureAwait(false)).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await available.ConfigureAwait(false);
+                    }
+                }
+            }
 
             public override void Write(byte[] buffer, int offset, int count) => _inner.Write(buffer, offset, count);
 
-            public override Task<int> ReadAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellationToken)
-                => Blocking(() => _inner.Read(buffer, offset, count), cancellationToken);
-
-            public override Task WriteAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellationToken)
-                => Blocking(() => { _inner.Write(buffer, offset, count); return true; }, cancellationToken);
+            public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    return Task.FromCanceled(cancellationToken);
+                try
+                {
+                    _inner.Write(buffer, offset, count);
+                    return Task.CompletedTask;
+                }
+                catch (Exception ex)
+                {
+                    return Task.FromException(ex);
+                }
+            }
 
 #if NETCOREAPP
-            public override ValueTask<int> ReadAsync(Memory<byte> buffer, System.Threading.CancellationToken cancellationToken = default)
+            public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
             {
                 if (System.Runtime.InteropServices.MemoryMarshal.TryGetArray<byte>(buffer, out var segment))
                     return new ValueTask<int>(ReadAsync(segment.Array, segment.Offset, segment.Count, cancellationToken));
                 return new ValueTask<int>(ReadCopyAsync(buffer, cancellationToken));
             }
 
-            private async Task<int> ReadCopyAsync(Memory<byte> buffer, System.Threading.CancellationToken cancellationToken)
+            private async Task<int> ReadCopyAsync(Memory<byte> buffer, CancellationToken cancellationToken)
             {
                 byte[] bytes = new byte[buffer.Length];
                 int count = await ReadAsync(bytes, 0, bytes.Length, cancellationToken).ConfigureAwait(false);
@@ -170,7 +334,7 @@ namespace SharpStun
                 return count;
             }
 
-            public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, System.Threading.CancellationToken cancellationToken = default)
+            public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
             {
                 byte[] bytes = buffer.ToArray();
                 return new ValueTask(WriteAsync(bytes, 0, bytes.Length, cancellationToken));
@@ -179,7 +343,18 @@ namespace SharpStun
 
             public override void Flush() => _inner.Flush();
 
-            public override Task FlushAsync(System.Threading.CancellationToken cancellationToken) => Blocking(() => { _inner.Flush(); return true; }, cancellationToken);
+            public override Task FlushAsync(CancellationToken cancellationToken)
+            {
+                try
+                {
+                    _inner.Flush();
+                    return Task.CompletedTask;
+                }
+                catch (Exception ex)
+                {
+                    return Task.FromException(ex);
+                }
+            }
 
             public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
 
@@ -189,9 +364,18 @@ namespace SharpStun
             {
                 if (disposing)
                 {
+                    TaskCompletionSource<bool> available;
+                    lock (_sync)
+                    {
+                        if (_disposed)
+                            return;
+                        _disposed = true;
+                        available = Signal();
+                    }
+                    available?.TrySetResult(true);
                     try
                     {
-                        // its close_notify, and the stream under it closed
+                        // its close_notify, and the stream under it closed: the reading thread's Read ends with it
                         _inner.Dispose();
                     }
                     catch (Exception ex) when (ex is IOException || ex is TlsException || ex is ObjectDisposedException)

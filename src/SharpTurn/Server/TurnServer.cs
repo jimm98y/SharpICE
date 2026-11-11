@@ -247,9 +247,24 @@ namespace SharpTurn
         private readonly Dictionary<string, Reservation> _reservations = new Dictionary<string, Reservation>();
         // the peers' connections of every TCP allocation, of their CONNECTION-IDs, of a ConnectionBind to find
         private readonly Dictionary<uint, TcpPeer> _tcpPeers = new Dictionary<uint, TcpPeer>();
-        // of the relays' ports, one of every server of the process: of .NET Framework, two made in one tick of the clock would
-        // be of one seed, and pick their ports alike
-        private static readonly Random _random = new Random();
+        // Relay ports are drawn from a CSPRNG (RFC 6056 port randomisation, RFC 8656 7.2), so they can't be predicted.
+        private static readonly RandomNumberGenerator PortRandom = RandomNumberGenerator.Create();
+
+        // A uniform integer in [min, max] (max inclusive), by rejection sampling.
+        private static int RandomPort(int min, int max)
+        {
+            uint range = (uint)(max - min) + 1;
+            uint limit = uint.MaxValue - uint.MaxValue % range;
+            byte[] bytes = new byte[4];
+            while (true)
+            {
+                lock (PortRandom)
+                    PortRandom.GetBytes(bytes);
+                uint value = BitConverter.ToUInt32(bytes, 0);
+                if (value < limit)
+                    return min + (int)(value % range);
+            }
+        }
 
         // a TCP relay's port taken of one server at a time, of this process: as it is bound of reuse, of a probe of it first
         private static readonly object TcpBinding = new object();
@@ -326,19 +341,22 @@ namespace SharpTurn
 
         private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
-        // a peer of the server's own: the unspecified addresses - of Linux, the host's own - its listeners, and of the host's
-        // addresses other than the loopback's - its interfaces', its relay addresses and the one it advertises - every port but
-        // those of its relays, as any service of the host's is of them, hidden as it may be of a firewall of the outside
-        // (RFC 8656 21.2.3). Another allocation's relay is a peer as any is: two clients of one server relay to each other of
-        // theirs. Of the loopback, the listeners alone: the default policy refuses the rest of it, and one that allows it, as
-        // tests do, means it.
-        private bool IsOwn(IPEndPoint peer)
+        // Whether a peer endpoint belongs to the server itself (RFC 8656 21.2.3), so must not be relayed to:
+        // - the unspecified addresses (on Linux, they reach the host);
+        // - the server's listeners;
+        // - any port of the host's own addresses (its interfaces, relay addresses and advertised address), since any host
+        //   service listens there, firewalled from the outside or not; the one exception is a live relay of the same
+        //   protocol on that very address and port, so that two clients of one server can relay to each other.
+        // On the loopback only the listeners are refused here: the default policy refuses the rest, and a policy that
+        // allows it (as tests do) means it.
+        private bool IsOwn(IPEndPoint peer, bool tcp)
         {
             var address = Normalize(peer.Address);
             if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
                 return true;
             bool loopback = IPAddress.IsLoopback(address);
-            bool host = !loopback && (HostAddresses.Contains(address) || address.Equals(_options.RelayAddress) || address.Equals(_options.RelayAddressV6)
+            var hostAddresses = HostAddresses;
+            bool host = !loopback && (hostAddresses.Contains(address) || address.Equals(_options.RelayAddress) || address.Equals(_options.RelayAddressV6)
                 || address.Equals(_options.AdvertisedRelayAddress));
             lock (_sync)
             {
@@ -347,28 +365,42 @@ namespace SharpTurn
                     if (listener.Port == peer.Port && ((loopback || host) && (listener.Address.Equals(IPAddress.Any) || listener.Address.Equals(IPAddress.IPv6Any)) || Normalize(listener.Address).Equals(address)))
                         return true;
                 }
-                return host && !IsRelayPort(peer.Port);
+                return host && !IsRelay(address, peer.Port, tcp, hostAddresses);
             }
         }
 
-        // under the lock: whether the port is of a relay of the server's, of an allocation of any client's
-        private bool IsRelayPort(int port)
+        // Under the lock: whether address:port is a live relay of any allocation, of the given protocol (a TCP relay's
+        // listener, or a UDP relay's socket), on the relay's own address or the one it advertises.
+        private bool IsRelay(IPAddress address, int port, bool tcp, HashSet<IPAddress> hostAddresses)
         {
             foreach (var allocation in _allocations.Values)
             {
                 foreach (var relay in allocation.Relays)
                 {
-                    if (relay.EndPoint.Port == port || relay.Advertised.Port == port)
+                    if ((relay.Listener != null) != tcp)
+                        continue;
+                    if (Matches(relay.EndPoint, address, port, hostAddresses) || Matches(relay.Advertised, address, port, hostAddresses))
                         return true;
                 }
             }
             return false;
         }
 
-        // whether the peer may be relayed to: not of the server's own, and of the options' choice
-        private bool IsAllowed(IPEndPoint peer)
+        // a relay bound to an unspecified address is on every host address
+        private bool Matches(IPEndPoint relay, IPAddress address, int port, HashSet<IPAddress> hostAddresses)
         {
-            if (peer == null || IsOwn(peer))
+            if (relay.Port != port)
+                return false;
+            var relayAddress = Normalize(relay.Address);
+            if (relayAddress.Equals(IPAddress.Any) || relayAddress.Equals(IPAddress.IPv6Any))
+                return hostAddresses.Contains(address) || address.Equals(_options.AdvertisedRelayAddress);
+            return relayAddress.Equals(address);
+        }
+
+        // Whether the peer may be relayed to, over UDP or (for Connect) TCP: not the server's own, and allowed by the options.
+        private bool IsAllowed(IPEndPoint peer, bool tcp = false)
+        {
+            if (peer == null || IsOwn(peer, tcp))
                 return false;
             return _options.AllowPeer == null || _options.AllowPeer(peer);
         }
@@ -775,8 +807,7 @@ namespace SharpTurn
             for (int attempt = 0; attempt < 64; attempt++)
             {
                 int port;
-                lock (_random)
-                    port = _random.Next(_options.PortMin, _options.PortMax + 1);
+                port = RandomPort(_options.PortMin, _options.PortMax);
                 var socket = TryBind(address, port);
                 if (socket != null)
                     return socket;
@@ -791,8 +822,7 @@ namespace SharpTurn
             for (int attempt = 0; attempt < 64; attempt++)
             {
                 int port;
-                lock (_random)
-                    port = _random.Next(_options.PortMin, _options.PortMax) & ~1;
+                port = RandomPort(_options.PortMin, Math.Max(_options.PortMin, _options.PortMax - 1)) & ~1;
                 if (port < _options.PortMin || port + (reserveNext ? 1 : 0) > _options.PortMax)
                     continue;
                 var socket = TryBind(address, port);
@@ -975,8 +1005,7 @@ namespace SharpTurn
             for (int attempt = 0; attempt < 64; attempt++)
             {
                 int port;
-                lock (_random)
-                    port = _random.Next(_options.PortMin, _options.PortMax + 1);
+                port = RandomPort(_options.PortMin, _options.PortMax);
                 lock (TcpBinding)
                 {
                     // of a port no socket has: one of reuse is bound over another's of reuse - another relay's - which would
@@ -1125,7 +1154,7 @@ namespace SharpTurn
                 relay = allocation.RelayOf(peer.AddressFamily);
             if (relay == null)
                 return request.Error(TurnErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
-            if (!IsAllowed(peer))
+            if (!IsAllowed(peer, tcp: true))
                 return request.Error(TurnErrorCode.Forbidden, "Forbidden");
 
             TcpPeer pending;
