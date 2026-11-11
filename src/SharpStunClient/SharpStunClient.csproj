@@ -10,6 +10,8 @@
   <ItemGroup>
     <InternalsVisibleTo Include="SharpICE.Tests" />
     <InternalsVisibleTo Include="SharpICE" />
+    <!-- of TURN: a connection of STUN taken over as a data connection (RFC 6062) -->
+    <InternalsVisibleTo Include="SharpTurnClient" />
   </ItemGroup>
 
   <ItemGroup>

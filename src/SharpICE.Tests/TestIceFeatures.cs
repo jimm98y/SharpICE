@@ -94,7 +94,10 @@ namespace SharpICE.Tests
             await Connect(controlling, controlled);
 
             Assert.IsTrue(controlling.SelectedPair.IsTcp && controlled.SelectedPair.IsTcp);
-            Assert.AreEqual(IceCandidate.TcpActive, controlling.SelectedPair.Local.TcpType, "the controlling one's active candidate, of the other's passive one");
+            // each agent connects to the other's passive candidate, and either connection may be the one nominated first
+            var selected = controlling.SelectedPair;
+            CollectionAssert.AreEquivalent(new[] { IceCandidate.TcpActive, IceCandidate.TcpPassive }, new[] { selected.Local.TcpType, selected.Remote.TcpType },
+                "an active candidate of a passive one");
             Assert.AreEqual(controlling.SelectedPair.LocalEndPoint, controlled.SelectedPair.RemoteEndPoint);
             Assert.AreEqual("hello", await SendAndReceive(controlling, controlled, "hello"));
             Assert.AreEqual("world", await SendAndReceive(controlled, controlling, "world"));
@@ -322,7 +325,9 @@ namespace SharpICE.Tests
 
             await Connect(resolving, hiding);
 
-            Assert.AreEqual(IceCandidateType.Host, resolving.SelectedPair.Remote.Type, "of the name resolved, not learnt of the checks");
+            // a check of the hiding agent's may come before its name is resolved, of a peer reflexive candidate first: of its
+            // signalled type once it is (RFC 8445 7.3.1.3)
+            await WaitUntil(() => resolving.SelectedPair.Remote.Type == IceCandidateType.Host, $"of the name resolved, not learnt of the checks: {resolving.SelectedPair.Remote}");
             Assert.AreEqual("127.0.0.1", resolving.SelectedPair.Remote.Address);
             Assert.AreEqual("hidden", await SendAndReceive(resolving, hiding, "hidden"));
             Assert.AreEqual("found", await SendAndReceive(hiding, resolving, "found"));

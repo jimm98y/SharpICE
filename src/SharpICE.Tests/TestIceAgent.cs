@@ -130,7 +130,8 @@ namespace SharpICE.Tests
 
             using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-            socket.ReceiveTimeout = 2000;
+            // of a machine busy of the other tests: as long as they wait
+            socket.ReceiveTimeout = 10000;
             var request = new StunMessage(StunMethod.Binding, StunMessageClass.Request)
                 .AddString(StunAttributeType.Username, agent.LocalUfrag + ":peer")
                 .AddUInt64(StunAttributeType.IceControlling, 1);

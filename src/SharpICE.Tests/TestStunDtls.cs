@@ -61,10 +61,20 @@ namespace SharpICE.Tests
             CertificateValidation = (s, c, ch, e) => true,
         };
 
+        // of a DataRow's name: "sharp" of SharpDTLS, "bc" of BouncyCastle
+        private static IDtlsStack Stack(string name) => name == "bc" ? DtlsStacks.BouncyCastle : DtlsStacks.SharpDtls;
+
+        private const ushort Dtls12 = 0xFEFD;
+        private const ushort Dtls13 = 0xFEFC;
+
         [TestMethod]
-        [DataRow(false)]
-        [DataRow(true)]
-        public async Task AnswersAClientOverDtls(bool ecdsa)
+        [DataRow(false, "sharp", "sharp")]
+        [DataRow(true, "sharp", "sharp")]
+        [DataRow(false, "bc", "bc")]
+        [DataRow(true, "bc", "bc")]
+        [DataRow(false, "sharp", "bc")]
+        [DataRow(true, "bc", "sharp")]
+        public async Task AnswersAClientOverDtls(bool ecdsa, string clientStack, string serverStack)
         {
             using var certificate = CreateCertificate("localhost", ecdsa);
             using var server = new StunServer(new StunServerOptions
@@ -72,13 +82,19 @@ namespace SharpICE.Tests
                 Realm = "example.org",
                 Users = new Dictionary<string, string> { ["user"] = "secret" },
                 Certificate = certificate,
+                DtlsStack = Stack(serverStack),
             });
             var dtls = server.ListenDtls(new IPEndPoint(IPAddress.Loopback, 0));
 
-            using var client = new StunClient(DtlsOptions());
+            var options = DtlsOptions();
+            options.DtlsStack = Stack(clientStack);
+            using var client = new StunClient(options);
             await client.ConnectAsync("stuns:localhost:" + dtls.Port);
 
-            Assert.IsInstanceOfType<StunDtlsTransport>(client.Transport);
+            var transport = (StunDtlsTransport)client.Transport;
+            Assert.AreSame(Stack(clientStack), transport.Stack);
+            // DTLS 1.3 of SharpDTLS of both sides; of BouncyCastle of either, DTLS 1.2, which it alone has
+            Assert.AreEqual(clientStack == "sharp" && serverStack == "sharp" ? Dtls13 : Dtls12, transport.NegotiatedVersion);
             Assert.IsFalse(client.Transport.IsReliable, "retransmitted, as over UDP");
             Assert.AreEqual(client.Transport.LocalEndPoint.Port, (await client.GetMappedAddressAsync()).Port);
             Assert.IsTrue(client.IsAuthenticated);
@@ -86,26 +102,32 @@ namespace SharpICE.Tests
         }
 
         [TestMethod]
-        public async Task RefusesACertificateTheSystemDoesNotTrust()
+        [DataRow("sharp")]
+        [DataRow("bc")]
+        public async Task RefusesACertificateTheSystemDoesNotTrust(string stack)
         {
             using var certificate = CreateCertificate("localhost");
-            using var server = new StunServer(new StunServerOptions { Certificate = certificate });
+            using var server = new StunServer(new StunServerOptions { Certificate = certificate, DtlsStack = Stack(stack) });
             var dtls = server.ListenDtls(new IPEndPoint(IPAddress.Loopback, 0));
             var options = DtlsOptions();
             options.CertificateValidation = null;
+            options.DtlsStack = Stack(stack);
 
             await Assert.ThrowsExactlyAsync<StunException>(() => new StunClient(options).ConnectAsync("stuns:localhost:" + dtls.Port));
         }
 
         [TestMethod]
-        public async Task TellsTheCallbackOfACertificateOfAnotherName()
+        [DataRow("sharp")]
+        [DataRow("bc")]
+        public async Task TellsTheCallbackOfACertificateOfAnotherName(string stack)
         {
             using var certificate = CreateCertificate("stun.example.org");
-            using var server = new StunServer(new StunServerOptions { Certificate = certificate });
+            using var server = new StunServer(new StunServerOptions { Certificate = certificate, DtlsStack = Stack(stack) });
             var dtls = server.ListenDtls(new IPEndPoint(IPAddress.Loopback, 0));
             var told = SslPolicyErrors.None;
 
-            using var transport = await StunDtlsTransport.ConnectAsync(dtls, "other.example.org", (s, c, chain, errors) => { told = errors; return true; });
+            using var transport = await StunDtlsTransport.ConnectAsync(dtls, "other.example.org", (s, c, chain, errors) => { told = errors; return true; }, Stack(stack));
+            Assert.AreSame(Stack(stack), transport.Stack);
 
             Assert.IsTrue((told & SslPolicyErrors.RemoteCertificateNameMismatch) != 0);
             Assert.IsTrue((told & SslPolicyErrors.RemoteCertificateChainErrors) != 0, "self-signed");

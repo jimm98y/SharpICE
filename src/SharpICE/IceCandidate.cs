@@ -66,12 +66,25 @@ namespace SharpICE
 
         public bool IsTcp => string.Equals(Transport, "tcp", StringComparison.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// Of ICE-TCP over TLS: a candidate of TCP, as RFC 6544 has one - "tcptype" and RFC 4571's framing - each connection of
+        /// it of TLS, the active side the TLS client. Its transport "tls" is no registered one: an agent that does not know it
+        /// leaves it out (RFC 8839 5.1), rather than connecting to it without TLS.
+        /// </summary>
+        public bool IsTls => string.Equals(Transport, "tls", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Of TCP, or of TLS over it: of connections, rather than of datagrams.</summary>
+        public bool IsStream => IsTcp || IsTls;
+
+        /// <summary>Whether two candidates are of one transport - UDP, TCP or TLS - which those of a pair are to be.</summary>
+        public static bool SameTransport(IceCandidate a, IceCandidate b) => a.IsUdp == b.IsUdp && a.IsTcp == b.IsTcp && a.IsTls == b.IsTls;
+
         public const string TcpActive = "active";
         public const string TcpPassive = "passive";
         public const string TcpSimultaneousOpen = "so";
 
         /// <summary>
-        /// Of a TCP candidate (RFC 6544 4.5), its "tcptype": "active" - it connects, of port 9 - "passive" - it is connected
+        /// Of a TCP candidate (RFC 6544 4.5), or of TLS, its "tcptype": "active" - it connects, of port 9 - "passive" - it is connected
         /// to - or "so", simultaneous-open. Kept among <see cref="Extensions"/>, where SDP has it.
         /// </summary>
         public string TcpType
@@ -107,9 +120,32 @@ namespace SharpICE
             _ => 0
         };
 
+        /// <summary>
+        /// The preference of each type of a transport - "udp", "tcp" or "tls": of TLS, each below TCP's of the type, as TLS is
+        /// of a peer that TCP alone does not reach either, past a firewall that lets TLS alone through.
+        /// </summary>
+        public static int TypePreference(IceCandidateType type, string transport)
+        {
+            if (string.Equals(transport, "tls", StringComparison.OrdinalIgnoreCase))
+            {
+                return type switch
+                {
+                    IceCandidateType.Host => 85,
+                    IceCandidateType.PeerReflexive => 75,
+                    IceCandidateType.ServerReflexive => 60,
+                    _ => 0
+                };
+            }
+            return TypePreference(type, string.Equals(transport, "tcp", StringComparison.OrdinalIgnoreCase));
+        }
+
         /// <summary>The priority of a candidate (RFC 8445 5.1.2.1), of UDP, or of TCP.</summary>
         public static uint ComputePriority(IceCandidateType type, int localPreference, int component, bool tcp = false)
             => (uint)((TypePreference(type, tcp) << 24) + ((localPreference & 0xFFFF) << 8) + (256 - component));
+
+        /// <summary>The priority of a candidate (RFC 8445 5.1.2.1) of a transport: "udp", "tcp" or "tls".</summary>
+        public static uint ComputePriority(IceCandidateType type, int localPreference, int component, string transport)
+            => (uint)((TypePreference(type, transport) << 24) + ((localPreference & 0xFFFF) << 8) + (256 - component));
 
         /// <summary>
         /// The local preference of a TCP candidate (RFC 6544 4.2): 2^13 times its direction's preference - of a host candidate,

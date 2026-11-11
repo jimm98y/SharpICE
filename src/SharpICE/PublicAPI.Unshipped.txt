@@ -1,0 +1,12 @@
+SharpICE.IceAgentOptions.DtlsStack.get -> SharpStunCommon.IDtlsStack
+SharpICE.IceAgentOptions.DtlsStack.set -> void
+SharpICE.IceAgentOptions.IncludeTls.get -> bool
+SharpICE.IceAgentOptions.IncludeTls.set -> void
+SharpICE.IceAgentOptions.TlsCertificate.get -> System.Security.Cryptography.X509Certificates.X509Certificate2
+SharpICE.IceAgentOptions.TlsCertificate.set -> void
+SharpICE.IceCandidate.IsStream.get -> bool
+SharpICE.IceCandidate.IsTls.get -> bool
+SharpICE.IceCandidatePair.IsTls.get -> bool
+static SharpICE.IceCandidate.ComputePriority(SharpICE.IceCandidateType type, int localPreference, int component, string transport) -> uint
+static SharpICE.IceCandidate.SameTransport(SharpICE.IceCandidate a, SharpICE.IceCandidate b) -> bool
+static SharpICE.IceCandidate.TypePreference(SharpICE.IceCandidateType type, string transport) -> int

@@ -67,6 +67,13 @@ namespace SharpICE
         /// <summary>Checks a TURN server's certificate of TLS or DTLS in place of the system's checks; of none, the system's.</summary>
         public System.Net.Security.RemoteCertificateValidationCallback TurnCertificateValidation { get; set; }
 
+        /// <summary>
+        /// The DTLS implementation of a TURN server of DTLS ("turns:...?transport=udp"): of
+        /// <see cref="SharpStunCommon.DtlsStacks.SharpDtls"/>, the default, DTLS 1.3 and 1.2; of
+        /// <see cref="SharpStunCommon.DtlsStacks.BouncyCastle"/>, DTLS 1.2.
+        /// </summary>
+        public SharpStunCommon.IDtlsStack DtlsStack { get; set; } = SharpStunCommon.DtlsStacks.Default;
+
         /// <summary>Whether to gather candidates of IPv6 addresses too, link-local ones left out.</summary>
         public bool IncludeIPv6 { get; set; } = true;
 
@@ -88,6 +95,25 @@ namespace SharpICE
         /// lets TCP alone through; UDP's are preferred over them.
         /// </summary>
         public bool IncludeTcp { get; set; } = false;
+
+        /// <summary>
+        /// Whether to gather candidates of ICE-TCP over TLS, of SharpDTLS: of each address, a passive and an active one as of
+        /// <see cref="IncludeTcp"/>, each connection of them of TLS 1.3 or 1.2 - the active side its client - and of transport
+        /// "tls" in SDP. Of a peer past a firewall that lets TLS alone through; TCP's are preferred over them. No other agent
+        /// signals these, so both peers are to be of SharpICE.
+        /// </summary>
+        /// <remarks>
+        /// The TLS of them hides the checks and the data from the network, and passes a firewall; it authenticates no one, for
+        /// the peer's certificate is known of nothing signalled: what does is ICE's own MESSAGE-INTEGRITY of each check, and
+        /// DTLS-SRTP's fingerprint of the media.
+        /// </remarks>
+        public bool IncludeTls { get; set; } = false;
+
+        /// <summary>
+        /// The certificate the passive candidates of TLS answer of, its private key exportable; of none, one of the agent's
+        /// own, self-signed.
+        /// </summary>
+        public System.Security.Cryptography.X509Certificates.X509Certificate2 TlsCertificate { get; set; }
 
         /// <summary>
         /// Whether the agent is an ICE lite one (RFC 8445 2.5): of host candidates alone, it sends no checks and answers the
