@@ -173,6 +173,13 @@ namespace SharpICE
         private bool _remoteGatheringComplete;
         private DateTime _remoteGatheringCompletedAt;
         private int _resolving;
+
+        // of the peer's mDNS names: those asked of already, their addresses once resolved, and the candidates of a name being
+        // resolved that came of it again; a few resolved at a time
+        private const int MaxMdnsResolutions = 8;
+        private readonly HashSet<string> _mdnsNames = new HashSet<string>();
+        private readonly Dictionary<string, IPAddress> _mdnsResolved = new Dictionary<string, IPAddress>();
+        private readonly List<IceCandidate> _mdnsWaiting = new List<IceCandidate>();
         private byte[] _remoteKey;
 
         public IceAgent(IceAgentOptions options = null)
@@ -860,24 +867,55 @@ namespace SharpICE
                     {
                         if (_closed)
                             return false;
+                        // each name resolved once - of a candidate of each transport of it, one query - and a few at a time, of
+                        // a peer that trickles names without end, that the agent floods the links of no multicast of them
+                        string key = candidate.Address.ToLowerInvariant();
+                        if (_mdnsResolved.TryGetValue(key, out var known))
+                        {
+                            // of a name resolved before: of its address, at once
+                            candidate.Address = known.ToString();
+                            endPoint = new IPEndPoint(known, candidate.Port);
+                        }
+                        else if (!_mdnsNames.Add(key))
+                        {
+                            // of a name being resolved: of its answer, once it comes
+                            if (_mdnsWaiting.Count < _options.MaxRemoteCandidates)
+                                _mdnsWaiting.Add(candidate);
+                            return true;
+                        }
+                    }
+                }
+                if (endPoint == null && candidate.Address.EndsWith(".local", StringComparison.OrdinalIgnoreCase))
+                {
+                    lock (_sync)
+                    {
+                        if (_resolving >= MaxMdnsResolutions)
+                        {
+                            _mdnsNames.Remove(candidate.Address.ToLowerInvariant());
+                            Trace($"Candidate left out, of {MaxMdnsResolutions} names being resolved already: {candidate}");
+                            return false;
+                        }
                         _resolving++;
                     }
                     _ = ResolveMdnsAsync(candidate);
                     return true;
                 }
-                if (!_options.ResolveHostNames)
-                    return false;
-                try
+                if (endPoint == null)
                 {
-                    var address = Dns.GetHostAddresses(candidate.Address).FirstOrDefault();
-                    if (address == null)
+                    if (!_options.ResolveHostNames)
                         return false;
-                    candidate.Address = address.ToString();
-                    endPoint = new IPEndPoint(address, candidate.Port);
-                }
-                catch (Exception ex) when (ex is SocketException || ex is ArgumentException)
-                {
-                    return false;
+                    try
+                    {
+                        var address = Dns.GetHostAddresses(candidate.Address).FirstOrDefault();
+                        if (address == null)
+                            return false;
+                        candidate.Address = address.ToString();
+                        endPoint = new IPEndPoint(address, candidate.Port);
+                    }
+                    catch (Exception ex) when (ex is SocketException || ex is ArgumentException)
+                    {
+                        return false;
+                    }
                 }
             }
             return AddResolved(candidate, endPoint);
@@ -918,14 +956,27 @@ namespace SharpICE
             {
                 var locals = GetLocalAddresses().Where(a => !IPAddress.IsLoopback(a) || _options.IncludeLoopback).ToList();
                 var address = await Mdns.ResolveAsync(name, locals, _options.IncludeIPv6, _options.MdnsTimeout).ConfigureAwait(false);
+                List<IceCandidate> waiting;
+                lock (_sync)
+                {
+                    string key = name.ToLowerInvariant();
+                    if (address != null && _mdnsResolved.Count < _options.MaxRemoteCandidates)
+                        _mdnsResolved[key] = address;
+                    waiting = _mdnsWaiting.Where(c => string.Equals(c.Address, name, StringComparison.OrdinalIgnoreCase)).ToList();
+                    _mdnsWaiting.RemoveAll(waiting.Contains);
+                }
                 if (address == null)
                 {
                     Trace($"Could not resolve {name}");
                     return;
                 }
                 Trace($"Resolved {name}: {address}");
-                candidate.Address = address.ToString();
-                AddResolved(candidate, new IPEndPoint(address, candidate.Port));
+                // the candidate, and those of the same name that came while it was being resolved
+                foreach (var resolved in new[] { candidate }.Concat(waiting))
+                {
+                    resolved.Address = address.ToString();
+                    AddResolved(resolved, new IPEndPoint(address, resolved.Port));
+                }
             }
             catch (Exception ex)
             {
@@ -938,8 +989,47 @@ namespace SharpICE
             }
         }
 
+        // whether a peer's address - signalled, or resolved of its name - is one checks may be sent to: of a host's of unicast
+        // alone, of no scope, as it is written of the address's own form; not the unspecified - of Linux, the host's own - nor
+        // multicast, nor broadcast, nor an IPv4 address mapped or compatible to IPv6, nor the loopback of an agent of none
+        private bool IsUsableRemote(IPAddress address, string text)
+        {
+            if (address == null)
+                return false;
+            if (address.AddressFamily == AddressFamily.InterNetwork)
+            {
+                byte[] b = address.GetAddressBytes();
+                if (b[0] == 0 || b[0] >= 224)
+                    return false;
+                // of four parts of decimal alone: not "127.1", nor of a number of one part, as an address of a peer's is written
+                if (text != null && text != address.ToString())
+                    return false;
+            }
+            else if (address.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                if (address.Equals(IPAddress.IPv6Any) || address.IsIPv6Multicast || address.IsIPv4MappedToIPv6 || address.ScopeId != 0)
+                    return false;
+                byte[] b = address.GetAddressBytes();
+                // ::/96, of the IPv4-compatible addresses
+                if (b.Take(12).All(x => x == 0) && !IPAddress.IsLoopback(address))
+                    return false;
+                if (text != null && text.IndexOf('%') >= 0)
+                    return false;
+            }
+            else
+            {
+                return false;
+            }
+            return !IPAddress.IsLoopback(address) || _options.IncludeLoopback;
+        }
+
         private bool AddResolved(IceCandidate candidate, IPEndPoint endPoint)
         {
+            if (!IsUsableRemote(endPoint.Address, candidate.EndPoint != null ? candidate.Address : null))
+            {
+                Trace($"Candidate left out, of an address no check goes to: {candidate}");
+                return false;
+            }
             lock (_sync)
             {
                 if (_closed)
@@ -1335,9 +1425,11 @@ namespace SharpICE
                 }
                 if (selected != null && selected.Connection == null && selected.Base == local && selected.RemoteEndPoint.Equals(from))
                     return true;
+                // of a pair whose peer authenticated alone - of a request of its, or of a check of ours that succeeded - not of
+                // any address it signalled, which anyone may send of
                 foreach (var pair in _pairs)
                 {
-                    if (pair.Base == local && pair.Connection == null && pair.RemoteEndPoint.Equals(from))
+                    if (pair.Base == local && pair.Connection == null && pair.Validated && pair.RemoteEndPoint.Equals(from))
                         return true;
                 }
                 return false;
@@ -1425,6 +1517,13 @@ namespace SharpICE
                 var remote = _remoteCandidates.FirstOrDefault(c => (tcp ? IceCandidate.SameTransport(c, local.Candidate) : c.IsUdp) && Equals(c.EndPoint, from));
                 if (remote == null)
                 {
+                    // of the peer's candidates no more than the signalled ones take, learnt of checks of sources it may spoof
+                    // or of connections it makes again and again: each a pair, and a check of it, of the agent's
+                    if (_remoteCandidates.Count + _resolving >= _options.MaxRemoteCandidates)
+                    {
+                        Trace($"Peer reflexive candidate of {from} left out, of {_options.MaxRemoteCandidates} already");
+                        return;
+                    }
                     remote = new IceCandidate
                     {
                         Foundation = "p" + (_remoteCandidates.Count + 1).ToString(CultureInfo.InvariantCulture),
@@ -1450,7 +1549,12 @@ namespace SharpICE
                     pair.Priority = PairPriority(pair);
                     _pairs.Add(pair);
                 }
-                pair.LastConsent = DateTime.UtcNow;
+                // the peer of the pair authenticated: its data taken of it from now on
+                pair.Validated = true;
+                // consent of the peer's requests to a lite agent alone, which sends no checks of its own to have it of: a full
+                // agent's is of the responses to its own (RFC 7675 5.1), as a request's source may be spoofed or it replayed
+                if (IsLite)
+                    pair.LastConsent = DateTime.UtcNow;
 
                 // a triggered check (RFC 8445 7.3.1.4), of a pair not known to work
                 if (!IsLite && _started && pair.State != IceCandidatePairState.Succeeded && pair.State != IceCandidatePairState.InProgress && !_triggered.Contains(pair))
@@ -1470,7 +1574,11 @@ namespace SharpICE
                     if (IsLite)
                     {
                         pair.State = IceCandidatePairState.Succeeded;
-                        selectedNow = Select(pair);
+                        // of a pair nominated already, another of a higher priority alone: a nomination of a request of a source
+                        // spoofed, or one replayed, moves the media of a lite agent - which checks nothing - nowhere else
+                        var current = SelectedPair;
+                        if (current == null || current == pair || !current.Nominated || pair.Priority > current.Priority)
+                            selectedNow = Select(pair);
                     }
                     else if (pair.LastSucceeded > DateTime.MinValue)
                     {
@@ -1561,6 +1669,7 @@ namespace SharpICE
 
                 pair.State = IceCandidatePairState.Succeeded;
                 pair.LastConsent = pair.LastSucceeded = DateTime.UtcNow;
+                pair.Validated = true;
                 Trace($"Check succeeded: {pair}");
 
                 // the pairs of its foundation unfrozen (RFC 8445 7.2.5.3.3)

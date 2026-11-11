@@ -150,19 +150,47 @@ namespace SharpStun
         {
             if (chain == null || chain.Count == 0)
                 return false;
-            var certificates = chain.Select(LoadCertificate).ToList();
-            var leaf = certificates[0];
-            var errors = SslPolicyErrors.None;
-            using (var x509Chain = new X509Chain())
+            var certificates = new List<X509Certificate2>();
+            try
             {
-                x509Chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-                foreach (var intermediate in certificates.Skip(1))
-                    x509Chain.ChainPolicy.ExtraStore.Add(intermediate);
-                if (!x509Chain.Build(leaf))
-                    errors |= SslPolicyErrors.RemoteCertificateChainErrors;
-                if (!MatchesHost(chain[0], host))
-                    errors |= SslPolicyErrors.RemoteCertificateNameMismatch;
-                return validation != null ? validation(sender, leaf, x509Chain, errors) : errors == SslPolicyErrors.None;
+                foreach (var der in chain)
+                    certificates.Add(LoadCertificate(der));
+                var leaf = certificates[0];
+                var errors = SslPolicyErrors.None;
+                using (var x509Chain = new X509Chain())
+                {
+                    x509Chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                    // of a certificate of a server's, as SslStream requires of one: of serverAuth of its extended key usage
+                    x509Chain.ChainPolicy.ApplicationPolicy.Add(new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.1"));
+                    foreach (var intermediate in certificates.Skip(1))
+                        x509Chain.ChainPolicy.ExtraStore.Add(intermediate);
+                    if (!x509Chain.Build(leaf))
+                        errors |= SslPolicyErrors.RemoteCertificateChainErrors;
+                    bool matches;
+                    try
+                    {
+                        matches = MatchesHost(chain[0], host);
+                    }
+                    catch (Exception ex) when (ex is ArgumentException || ex is FormatException || ex is IOException || ex is InvalidOperationException
+                        || ex is Org.BouncyCastle.Security.Certificates.CertificateException || ex is Org.BouncyCastle.Asn1.Asn1Exception)
+                    {
+                        // of names not well formed - an IP address of a length of none - of no name matched
+                        matches = false;
+                    }
+                    if (!matches)
+                        errors |= SslPolicyErrors.RemoteCertificateNameMismatch;
+                    return validation != null ? validation(sender, leaf, x509Chain, errors) : errors == SslPolicyErrors.None;
+                }
+            }
+            catch (System.Security.Cryptography.CryptographicException)
+            {
+                // of a chain not of certificates: of none taken
+                return false;
+            }
+            finally
+            {
+                foreach (var certificate in certificates)
+                    certificate.Dispose();
             }
         }
 

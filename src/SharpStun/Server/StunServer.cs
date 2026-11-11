@@ -124,6 +124,9 @@ namespace SharpStun
         /// stream its own until the task ends, and closed then.
         /// </summary>
         internal Func<Stream, Task> Handoff { get; set; }
+
+        /// <summary>Whether a request over it was authenticated of the long-term credentials: of TCP and TLS, its idle timeout.</summary>
+        internal bool Authenticated { get; set; }
     }
 
     /// <summary>
@@ -228,6 +231,21 @@ namespace SharpStun
         /// The connections of TCP and TLS at most at once, of all listeners: past them, a new one is closed as it is accepted.
         /// </summary>
         public int MaxConnections { get; set; } = 1000;
+
+        /// <summary>
+        /// The connections of TCP and TLS of one source address at most at once: past them, a new one of it is closed as it is
+        /// accepted, that one host takes not every slot of <see cref="MaxConnections"/>. Of clients behind one NAT, more.
+        /// </summary>
+        public int MaxConnectionsPerAddress { get; set; } = 100;
+
+        /// <summary>How long a write to a connection of TCP or TLS may wait for the client to read: past it, the connection is closed.</summary>
+        public TimeSpan WriteTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+        /// <summary>
+        /// Of a server of a realm, how long a connection of TCP or TLS that has authenticated no request yet may send nothing:
+        /// past it, it is closed, as one of unauthenticated Binding requests alone would hold its slot for long.
+        /// </summary>
+        public TimeSpan UnauthenticatedIdleTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
         /// <summary>The associations of DTLS at most at once of each listener: past them, a new peer is ignored.</summary>
         public int MaxDtlsPeers { get; set; } = 1000;
@@ -385,13 +403,18 @@ namespace SharpStun
                 Established = from =>
                 {
                     var peer = peers.GetOrAdd(from, _ => new DtlsPeer());
+                    peer.LastReceived = DateTime.UtcNow;
                     peer.Connection = new StunServerConnection(StunServerProtocol.Dtls, local, from, (data, offset, length) => dtls.Send(from, data, offset, length));
                     Trace($"DTLS of {from}");
                 },
                 RecordReceived = (from, buffer, offset, count) =>
                 {
                     if (peers.TryGetValue(from, out var peer) && peer.Connection != null)
+                    {
+                        // of a record decrypted alone, not of any datagram of its address, which anyone may send of it
+                        peer.LastReceived = DateTime.UtcNow;
                         ReceiveSafely(peer.Connection, buffer, offset, count);
+                    }
                 },
                 Closed = from =>
                 {
@@ -432,11 +455,7 @@ namespace SharpStun
                         continue;
 
                     var from = receiver.RemoteEndPoint;
-                    if (dtls.HasAssociation(from))
-                    {
-                        peers.GetOrAdd(from, _ => new DtlsPeer()).LastReceived = DateTime.UtcNow;
-                    }
-                    else if (dtls.Peers.Count >= _options.MaxDtlsPeers)
+                    if (!dtls.HasAssociation(from) && dtls.Count >= _options.MaxDtlsPeers)
                     {
                         // a peer of no association: past the limit, its ClientHello left unanswered
                         Trace($"DTLS of {from} refused: {_options.MaxDtlsPeers} associations already");
@@ -455,17 +474,28 @@ namespace SharpStun
             }
         }
 
+        // the established associations of no record of their peer's for too long, closed; those of a handshake left, of the
+        // stack's own handshake timeout. Of a timer's thread: whatever a handler of it throws ends this round alone, never
+        // the process.
         private void CloseIdle(IDtlsServer dtls, ConcurrentDictionary<IPEndPoint, DtlsPeer> peers)
         {
-            var now = DateTime.UtcNow;
-            foreach (var from in dtls.Peers)
+            try
             {
-                var peer = peers.GetOrAdd(from, _ => new DtlsPeer());
-                if (now - peer.LastReceived > _options.DtlsIdleTimeout)
+                var now = DateTime.UtcNow;
+                foreach (var entry in peers.ToList())
                 {
-                    Trace($"DTLS of {from} idle");
-                    dtls.Close(from);
+                    if (now - entry.Value.LastReceived > _options.DtlsIdleTimeout)
+                    {
+                        Trace($"DTLS of {entry.Key} idle");
+                        dtls.Close(entry.Key);
+                        // of a stack that told of it not, forgotten all the same
+                        peers.TryRemove(entry.Key, out _);
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                Trace($"Idle associations of DTLS not closed: {ex.Message}");
             }
         }
 
@@ -548,13 +578,44 @@ namespace SharpStun
                     client.Dispose();
                     continue;
                 }
-                _ = ServeStreamCountedAsync(client, tls);
+                // of each source's own share of them, that one host takes not all
+                IPAddress source;
+                try
+                {
+                    source = Normalize((IPEndPoint)client.Client.RemoteEndPoint).Address;
+                }
+                catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException)
+                {
+                    Interlocked.Decrement(ref _connections);
+                    client.Dispose();
+                    continue;
+                }
+                if (_connectionsOf.AddOrUpdate(source, 1, (_, count) => count + 1) > _options.MaxConnectionsPerAddress)
+                {
+                    Release(source);
+                    Interlocked.Decrement(ref _connections);
+                    Trace($"Connection of {source} refused: {_options.MaxConnectionsPerAddress} of it already");
+                    client.Dispose();
+                    continue;
+                }
+                _ = ServeStreamCountedAsync(client, tls, source);
             }
         }
 
         private int _connections;
+        private readonly ConcurrentDictionary<IPAddress, int> _connectionsOf = new ConcurrentDictionary<IPAddress, int>();
 
-        private async Task ServeStreamCountedAsync(TcpClient client, bool tls)
+        // one of the source's connections ended: of none left, the source forgotten
+        private void Release(IPAddress source)
+        {
+            while (_connectionsOf.TryGetValue(source, out int count))
+            {
+                if (count <= 1 ? ((ICollection<KeyValuePair<IPAddress, int>>)_connectionsOf).Remove(new KeyValuePair<IPAddress, int>(source, count)) : _connectionsOf.TryUpdate(source, count - 1, count))
+                    return;
+            }
+        }
+
+        private async Task ServeStreamCountedAsync(TcpClient client, bool tls, IPAddress source)
         {
             try
             {
@@ -566,9 +627,15 @@ namespace SharpStun
             }
             finally
             {
+                Release(source);
                 Interlocked.Decrement(ref _connections);
             }
         }
+
+        // how long a connection may send nothing: of a server of credentials, of one that has authenticated no request yet, a
+        // short while, that connections no one authenticates hold no slot for long
+        private TimeSpan IdleTimeout(StunServerConnection connection)
+            => _options.Realm == null || connection.Authenticated ? _options.ConnectionIdleTimeout : _options.UnauthenticatedIdleTimeout;
 
         // the connection's buffer of a message of the length given, of the pool: the one it has, or a larger one of what it holds
         private static byte[] Grow(byte[] buffer, int length, int kept)
@@ -594,6 +661,9 @@ namespace SharpStun
                 var local = (IPEndPoint)client.Client.LocalEndPoint;
                 StunServerConnection connection = null;
                 deadline.CancelAfter(_options.FirstMessageTimeout);
+                // a write to a client that reads nothing ends in a while, rather than holding the thread it blocks - of TURN, a
+                // relay's loop - and the connection with it
+                client.Client.SendTimeout = (int)Math.Min(int.MaxValue, Math.Max(1, _options.WriteTimeout.TotalMilliseconds));
                 try
                 {
                     Stream stream = client.GetStream();
@@ -606,8 +676,17 @@ namespace SharpStun
                         var writing = new object();
                         connection = new StunServerConnection(tls ? StunServerProtocol.Tls : StunServerProtocol.Tcp, local, from, (data, offset, count) =>
                         {
-                            lock (writing)
-                                stream.Write(data, offset, count);
+                            try
+                            {
+                                lock (writing)
+                                    stream.Write(data, offset, count);
+                            }
+                            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException)
+                            {
+                                // of a write that timed out, or of a connection gone: closed, its reads ended with it
+                                client.Dispose();
+                                throw;
+                            }
                         });
                         // the connection's one buffer, of a pool: of a datagram's size, larger only as a message takes it, so that
                         // a connection that sends nothing holds little
@@ -625,8 +704,8 @@ namespace SharpStun
                                     buffer = Grow(buffer, 4 + padded, 4);
                                     if (!await ReadAsync(stream, buffer, 4, padded).ConfigureAwait(false))
                                         return;
-                                    deadline.CancelAfter(_options.ConnectionIdleTimeout);
                                     ReceiveSafely(connection, buffer, 0, 4 + dataLength);
+                                    deadline.CancelAfter(IdleTimeout(connection));
                                     continue;
                                 }
                                 if (!await ReadAsync(stream, buffer, 4, StunMessage.HeaderLength - 4).ConfigureAwait(false))
@@ -637,8 +716,9 @@ namespace SharpStun
                                 buffer = Grow(buffer, StunMessage.HeaderLength + length, StunMessage.HeaderLength);
                                 if (!await ReadAsync(stream, buffer, StunMessage.HeaderLength, length).ConfigureAwait(false))
                                     return;
-                                deadline.CancelAfter(_options.ConnectionIdleTimeout);
                                 ReceiveSafely(connection, buffer, 0, StunMessage.HeaderLength + length);
+                                // of the request just authenticated, if it was, the idle timeout of one that has
+                                deadline.CancelAfter(IdleTimeout(connection));
 
                                 // taken over of the response just sent: of no deadline from now on, the stream its taker's
                                 var handoff = connection.Handoff;
@@ -765,6 +845,7 @@ namespace SharpStun
                     connection.Send(Finish(error, request, null, StunIntegrity.None));
                     return;
                 }
+                connection.Authenticated = true;
             }
 
             // of an attribute it is not to be understood without, a 420 that lists them (RFC 8489 6.3.1)
@@ -811,7 +892,9 @@ namespace SharpStun
         // its SOFTWARE, its integrity of the request's, and a FINGERPRINT, of a request of one
         private byte[] Finish(StunMessage response, StunMessage request, byte[] key, StunIntegrity integrity)
         {
-            if (_options.Software != null)
+            // of an error of an unauthenticated request - a 401's of a source that may be spoofed - no SOFTWARE, that what
+            // such a request draws back is as little more than it as it can be (RFC 8489 16.1)
+            if (_options.Software != null && (key != null || response.Class == StunMessageClass.SuccessResponse))
                 response.AddString(StunAttributeType.Software, _options.Software);
             return response.ToBytes(key, integrity, request.HasFingerprint);
         }
@@ -822,6 +905,41 @@ namespace SharpStun
         #endregion // Processing
 
         #region Credentials
+
+        // the users of each USERHASH (RFC 8489 14.4), of the realm and the users they were made of: made again as either changes
+        private readonly object _userhashesSync = new object();
+        private Dictionary<string, string> _userhashes;
+        private string _userhashesRealm;
+        private IDictionary<string, string> _userhashesUsers;
+        private int _userhashesCount = -1;
+
+        private string UserOfHash(string realm, byte[] userhash)
+        {
+            lock (_userhashesSync)
+            {
+                var users = _options.Users;
+                if (_userhashes == null || _userhashesRealm != realm || !ReferenceEquals(_userhashesUsers, users) || _userhashesCount != users.Count)
+                {
+                    var map = new Dictionary<string, string>();
+                    foreach (var user in users.Keys.ToList())
+                    {
+                        try
+                        {
+                            map[Convert.ToBase64String(StunCredentials.UserHash(user, realm))] = user;
+                        }
+                        catch (ArgumentException)
+                        {
+                            // of a name OpaqueString refuses: of no hash, as of no request of it
+                        }
+                    }
+                    _userhashes = map;
+                    _userhashesRealm = realm;
+                    _userhashesUsers = users;
+                    _userhashesCount = users.Count;
+                }
+                return _userhashes.TryGetValue(Convert.ToBase64String(userhash), out string name) ? name : null;
+            }
+        }
 
         private StunSecurityFeatures Features
             => (_options.PasswordAlgorithms.Count > 0 ? StunSecurityFeatures.PasswordAlgorithms : StunSecurityFeatures.None)
@@ -873,14 +991,12 @@ namespace SharpStun
                 }
                 else if (userhash != null && _options.UsernameAnonymity)
                 {
-                    foreach (var user in _options.Users)
+                    // of a map of each user's hash, made once of the users there are: not a hash of every user of each request,
+                    // which a request of any USERHASH, of a source spoofed, would make the server compute
+                    if (UserOfHash(realm, userhash.Value) is string user && _options.Users.TryGetValue(user, out found))
                     {
-                        if (StunCredentials.UserHash(user.Key, realm).SequenceEqual(userhash.Value))
-                        {
-                            username = user.Key;
-                            password = user.Value;
-                            break;
-                        }
+                        username = user;
+                        password = found;
                     }
                 }
             }

@@ -72,9 +72,11 @@ namespace SharpStun
 
         private static async Task<List<DnsSrvRecord>> QueryAsync(IPAddress server, string name, TimeSpan timeout, CancellationToken cancellationToken)
         {
-            ushort id;
-            lock (Random)
-                id = (ushort)Random.Next(0x10000);
+            // of a random ID of a CSPRNG's, that an answer forged off the path is to guess it as well as the port
+            byte[] idBytes = new byte[2];
+            using (var random = System.Security.Cryptography.RandomNumberGenerator.Create())
+                random.GetBytes(idBytes);
+            ushort id = BinaryPrimitives.ReadUInt16BigEndian(idBytes);
             byte[] query = BuildQuery(id, name);
             using (var socket = new Socket(server.AddressFamily, SocketType.Dgram, ProtocolType.Udp))
             {
@@ -88,7 +90,9 @@ namespace SharpStun
                     while (DateTime.UtcNow < deadline)
                     {
                         var receive = socket.ReceiveFromAsync(new ArraySegment<byte>(buffer), SocketFlags.None, new IPEndPoint(server.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0));
-                        var completed = await Task.WhenAny(receive, Task.Delay(deadline - DateTime.UtcNow, cancellationToken)).ConfigureAwait(false);
+                        // of no wait below none: the deadline may have passed since the loop's check
+                        var left = deadline - DateTime.UtcNow;
+                        var completed = await Task.WhenAny(receive, Task.Delay(left > TimeSpan.Zero ? left : TimeSpan.Zero, cancellationToken)).ConfigureAwait(false);
                         if (completed != receive)
                             return null;
                         var result = await receive.ConfigureAwait(false);
@@ -142,7 +146,8 @@ namespace SharpStun
         /// </summary>
         internal static List<DnsSrvRecord> ParseResponse(byte[] message, int count, ushort id)
         {
-            var answers = DnsMessage.ParseResponse(message, count, id, out int rcode);
+            // of the answer section alone: an SRV record of the additional one is of nothing asked
+            var answers = DnsMessage.ParseResponse(message, count, id, out int rcode, includeAdditional: false);
             if (rcode == 3) // NXDOMAIN
                 return new List<DnsSrvRecord>();
             if (answers == null || rcode != 0)

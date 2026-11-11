@@ -108,7 +108,7 @@ namespace SharpStun
             {
                 // of a handshake that blocks: cancelled of the stream closed under it
                 using (cancellationToken.Register(() => inner.Dispose()))
-                    await Task.Run(() => protocol.Connect(new Client(new BcTlsCrypto(new SecureRandom()), settings)), cancellationToken).ConfigureAwait(false);
+                    await Blocking(() => { protocol.Connect(new Client(new BcTlsCrypto(new SecureRandom()), settings)); return true; }, cancellationToken).ConfigureAwait(false);
                 return new BlockingStream(protocol.Stream);
             }
             catch (Exception ex) when (ex is TlsException || ex is ObjectDisposedException)
@@ -121,9 +121,15 @@ namespace SharpStun
 
         public ITlsServer CreateServer(X509Certificate2 certificate) => new Server(certificate ?? throw new ArgumentNullException(nameof(certificate)));
 
+        // a blocking call of BouncyCastle's - a handshake, a read, a write - of a thread of its own, not of the pool's: as one
+        // may wait for as long as its peer makes it, of many connections the pool's would all wait, and every async loop of
+        // the process with them
+        private static Task<T> Blocking<T>(Func<T> call, CancellationToken cancellationToken)
+            => Task.Factory.StartNew(call, cancellationToken, TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
+
         /// <summary>
         /// BouncyCastle's stream of a connection, of a read and a write at once: its async calls of its blocking ones, each of
-        /// a thread of the pool - as Stream's own run one at a time, a read waiting for data holding up every write - as
+        /// a thread of its own - as Stream's own run one at a time, a read waiting for data holding up every write - as
         /// BouncyCastle reads of one thread and writes of another.
         /// </summary>
         private sealed class BlockingStream : Stream
@@ -143,10 +149,10 @@ namespace SharpStun
             public override void Write(byte[] buffer, int offset, int count) => _inner.Write(buffer, offset, count);
 
             public override Task<int> ReadAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellationToken)
-                => Task.Run(() => _inner.Read(buffer, offset, count), cancellationToken);
+                => Blocking(() => _inner.Read(buffer, offset, count), cancellationToken);
 
             public override Task WriteAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellationToken)
-                => Task.Run(() => _inner.Write(buffer, offset, count), cancellationToken);
+                => Blocking(() => { _inner.Write(buffer, offset, count); return true; }, cancellationToken);
 
 #if NETCOREAPP
             public override ValueTask<int> ReadAsync(Memory<byte> buffer, System.Threading.CancellationToken cancellationToken = default)
@@ -173,7 +179,7 @@ namespace SharpStun
 
             public override void Flush() => _inner.Flush();
 
-            public override Task FlushAsync(System.Threading.CancellationToken cancellationToken) => Task.Run(() => _inner.Flush(), cancellationToken);
+            public override Task FlushAsync(System.Threading.CancellationToken cancellationToken) => Blocking(() => { _inner.Flush(); return true; }, cancellationToken);
 
             public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
 
@@ -203,6 +209,9 @@ namespace SharpStun
             public Client(TlsCrypto crypto, TlsClientSettings settings) : base(crypto) => _settings = settings;
 
             protected override ProtocolVersion[] GetSupportedVersions() => ProtocolVersion.TLSv12.Only();
+
+            // of ECDHE and AEAD alone, of forward secrecy: none of DefaultTlsClient's of RSA's key exchange or of CBC
+            protected override int[] GetSupportedCipherSuites() => BcDtlsStack.SecureCipherSuites;
 
             protected override IList<ServerName> GetSniServerNames()
             {
@@ -248,7 +257,7 @@ namespace SharpStun
                 try
                 {
                     using (cancellationToken.Register(() => inner.Dispose()))
-                        await Task.Run(() => protocol.Accept(new BcDtlsStack.BcServer(_crypto, _credentials, 0, ProtocolVersion.TLSv12.Only())), cancellationToken).ConfigureAwait(false);
+                        await Blocking(() => { protocol.Accept(new BcDtlsStack.BcServer(_crypto, _credentials, 0, ProtocolVersion.TLSv12.Only())); return true; }, cancellationToken).ConfigureAwait(false);
                     return new BlockingStream(protocol.Stream);
                 }
                 catch (Exception ex) when (ex is TlsException || ex is ObjectDisposedException)

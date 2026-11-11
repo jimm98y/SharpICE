@@ -256,6 +256,10 @@ namespace SharpICE
                     return;
                 }
 
+                // of the link alone, as an answer of mDNS is (RFC 6762 11): not of a host past a router, which would make the
+                // agent check an address of its choosing
+                if (!MdnsResponder.IsOnLink(((IPEndPoint)result.RemoteEndPoint).Address))
+                    continue;
                 // any ID: a responder answers a query of a port of its own of its ID, one of multicast of 0
                 var records = DnsMessage.ParseResponse(buffer, result.ReceivedBytes, null, out int rcode);
                 if (records == null || rcode != 0)

@@ -49,6 +49,17 @@ namespace SharpStun
         // of an IPv4 path of a link of 1500 bytes: what a record is to fit in, unfragmented (RFC 6347 4.1.1)
         private const int Mtu = 1472;
 
+        // a client's cipher suites, of TLS and of DTLS: of ECDHE and AEAD alone, of forward secrecy
+        internal static readonly int[] SecureCipherSuites =
+        {
+            CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+            CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        };
+
         public string Name => "BouncyCastle";
 
         public async Task<IDtlsAssociation> ConnectAsync(Socket socket, DtlsClientSettings settings, CancellationToken cancellationToken = default)
@@ -130,14 +141,22 @@ namespace SharpStun
                             _settings.RecordReceived?.Invoke(buffer, 0, count);
                     }
                 }
-                catch (Exception ex) when (ex is IOException || ex is TlsException || ex is ObjectDisposedException || ex is SocketException)
+                catch (Exception ex)
                 {
+                    // of a thread of its own: whatever ends it - BouncyCastle's, a handler's - the association's alone, never the
+                    // process's
                     error = ex;
                 }
                 if (!_closed)
                 {
                     _closed = true;
-                    _settings.Closed?.Invoke(error);
+                    try
+                    {
+                        _settings.Closed?.Invoke(error);
+                    }
+                    catch (Exception)
+                    {
+                    }
                 }
             }
 
@@ -168,6 +187,9 @@ namespace SharpStun
             public ushort NegotiatedVersion { get; private set; }
 
             protected override ProtocolVersion[] GetSupportedVersions() => ProtocolVersion.DTLSv12.Only();
+
+            // of ECDHE and AEAD alone, of forward secrecy: none of DefaultTlsClient's of RSA's key exchange or of CBC
+            protected override int[] GetSupportedCipherSuites() => SecureCipherSuites;
 
             public override void NotifyServerVersion(ProtocolVersion serverVersion)
             {
@@ -348,6 +370,8 @@ namespace SharpStun
 
             public IReadOnlyCollection<IPEndPoint> Peers => _peers.Keys.ToList();
 
+            public int Count => _peers.Count;
+
             public void Send(IPEndPoint peer, byte[] buffer, int offset, int count)
             {
                 if (!_peers.TryGetValue(peer, out var state) || state.Dtls == null)
@@ -383,7 +407,14 @@ namespace SharpStun
                 {
                 }
                 peer.Datagrams.Close();
-                _settings.Closed?.Invoke(from);
+                try
+                {
+                    _settings.Closed?.Invoke(from);
+                }
+                catch (Exception)
+                {
+                    // of the peer's thread, or of a timer's: a handler's failure ends nothing else
+                }
             }
 
             public void Dispose()
@@ -492,8 +523,16 @@ namespace SharpStun
                 ArraySegment<byte> datagram;
                 try
                 {
+                    // of datagrams ended - BouncyCastle's own close of the transport, of the peer's close_notify - an end, not a
+                    // wait of none: as TryTake returns at once of a collection completed, the reader would spin for ever
+                    if (_received.IsCompleted)
+                        throw new IOException("The peer's datagrams ended.");
                     if (!_received.TryTake(out datagram, waitMillis))
+                    {
+                        if (_received.IsCompleted)
+                            throw new IOException("The peer's datagrams ended.");
                         return -1;
+                    }
                 }
                 catch (Exception ex) when (ex is ObjectDisposedException || ex is InvalidOperationException)
                 {

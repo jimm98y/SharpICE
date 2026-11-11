@@ -84,7 +84,7 @@ namespace SharpStun
         /// The records of a response's answer and additional sections, its RCODE given; null of what is no response - or of
         /// another ID, of an ID asked for - or is not well formed.
         /// </summary>
-        public static List<DnsRecord> ParseResponse(byte[] message, int count, ushort? id, out int rcode)
+        public static List<DnsRecord> ParseResponse(byte[] message, int count, ushort? id, out int rcode, bool includeAdditional = true)
         {
             rcode = -1;
             try
@@ -127,8 +127,8 @@ namespace SharpStun
                     if (position + length > count)
                         return null;
                     position += length;
-                    // the authority section's are of no use here
-                    if (i < answers || i >= answers + authorities)
+                    // the authority section's are of no use here; the additional section's, of what asks for them
+                    if (i < answers || includeAdditional && i >= answers + authorities)
                         records.Add(record);
                 }
                 return records;
@@ -139,39 +139,54 @@ namespace SharpStun
             }
         }
 
-        /// <summary>A name of labels and of pointers to names before it (RFC 1035 4.1.4); the position after it.</summary>
+        // the longest a name is, of its labels and their lengths (RFC 1035 2.3.4)
+        private const int MaxNameLength = 255;
+
+        /// <summary>
+        /// A name of labels and of pointers to names before it (RFC 1035 4.1.4); the position after it. Of a name longer than
+        /// 255 bytes, or of a pointer to anything but what came before it - of a loop, or of names built of pointers forward
+        /// ever longer - none.
+        /// </summary>
         public static string ReadName(byte[] message, int count, ref int position)
         {
             var name = new StringBuilder();
             int at = position;
             bool jumped = false;
             int jumps = 0;
+            int length = 0;
             while (true)
             {
                 if (at >= count)
                     throw new FormatException();
-                int length = message[at];
-                if ((length & 0xC0) == 0xC0)
+                int label = message[at];
+                if ((label & 0xC0) == 0xC0)
                 {
                     if (at + 1 >= count || ++jumps > 16)
+                        throw new FormatException();
+                    int target = (label & 0x3F) << 8 | message[at + 1];
+                    // to a name before this pointer alone: a compressed name is of what the message had already
+                    if (target >= at)
                         throw new FormatException();
                     if (!jumped)
                         position = at + 2;
                     jumped = true;
-                    at = (length & 0x3F) << 8 | message[at + 1];
+                    at = target;
                     continue;
                 }
-                if ((length & 0xC0) != 0)
+                if ((label & 0xC0) != 0)
                     throw new FormatException();
                 at++;
-                if (length == 0)
+                length += 1 + label;
+                if (length > MaxNameLength)
+                    throw new FormatException();
+                if (label == 0)
                     break;
-                if (at + length > count)
+                if (at + label > count)
                     throw new FormatException();
                 if (name.Length > 0)
                     name.Append('.');
-                name.Append(Encoding.UTF8.GetString(message, at, length));
-                at += length;
+                name.Append(Encoding.UTF8.GetString(message, at, label));
+                at += label;
             }
             if (!jumped)
                 position = at;

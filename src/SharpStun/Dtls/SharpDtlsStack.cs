@@ -349,6 +349,8 @@ namespace SharpStun
 
             public IReadOnlyCollection<IPEndPoint> Peers => _peers.Keys.Cast<IPEndPoint>().ToList();
 
+            public int Count => _peers.Count;
+
             public void Send(IPEndPoint peer, byte[] buffer, int offset, int count)
             {
                 if (!_peers.TryGetValue(peer, out var state) || !state.Established)
@@ -374,13 +376,22 @@ namespace SharpStun
                 _settings.Closed?.Invoke(peer);
             }
 
+            // of a timer's thread: whatever a handler of Closed throws ends this round alone, never the process
             private void EndLateHandshakes()
             {
                 var now = DateTime.UtcNow;
                 foreach (var entry in _peers.ToList())
                 {
                     if (!entry.Value.Established && now - entry.Value.Created > _settings.HandshakeTimeout)
-                        Close((IPEndPoint)entry.Key);
+                    {
+                        try
+                        {
+                            Close((IPEndPoint)entry.Key);
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
                 }
             }
 

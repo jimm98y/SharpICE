@@ -193,14 +193,26 @@ namespace SharpTurn
                 return null;
             }
 
-            public Channel ChannelOf(IPEndPoint peer)
+            // the channels of each peer: of the peer of each datagram a relay gets, at once, not of a scan of every channel
+            private readonly Dictionary<IPEndPoint, Channel> _channelsOfPeer = new Dictionary<IPEndPoint, Channel>();
+
+            public Channel ChannelOf(IPEndPoint peer) => _channelsOfPeer.TryGetValue(peer, out var channel) ? channel : null;
+
+            public void AddChannel(Channel channel)
             {
-                foreach (var channel in Channels.Values)
+                if (Channels.TryGetValue(channel.Number, out var old))
+                    _channelsOfPeer.Remove(old.Peer);
+                Channels[channel.Number] = channel;
+                _channelsOfPeer[channel.Peer] = channel;
+            }
+
+            public void RemoveChannel(ushort number)
+            {
+                if (Channels.TryGetValue(number, out var channel))
                 {
-                    if (channel.Peer.Equals(peer))
-                        return channel;
+                    Channels.Remove(number);
+                    _channelsOfPeer.Remove(channel.Peer);
                 }
-                return null;
             }
         }
 
@@ -279,38 +291,74 @@ namespace SharpTurn
             return endPoint;
         }
 
-        // the addresses of this host: of a listener of any address, what a peer of its port would reach
-        private static readonly Lazy<HashSet<IPAddress>> LocalAddresses = new Lazy<HashSet<IPAddress>>(() =>
+        // the addresses of this host's interfaces: read again each minute, as they change
+        private static readonly object HostAddressesSync = new object();
+        private static HashSet<IPAddress> _hostAddresses;
+        private static DateTime _hostAddressesRead;
+
+        private static HashSet<IPAddress> HostAddresses
         {
-            var addresses = new HashSet<IPAddress>();
-            try
+            get
             {
-                foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+                lock (HostAddressesSync)
                 {
-                    foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
-                        addresses.Add(unicast.Address);
+                    if (_hostAddresses == null || DateTime.UtcNow - _hostAddressesRead > TimeSpan.FromMinutes(1))
+                    {
+                        var addresses = new HashSet<IPAddress>();
+                        try
+                        {
+                            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+                            {
+                                foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
+                                    addresses.Add(Normalize(unicast.Address));
+                            }
+                        }
+                        catch (NetworkInformationException)
+                        {
+                        }
+                        _hostAddresses = addresses;
+                        _hostAddressesRead = DateTime.UtcNow;
+                    }
+                    return _hostAddresses;
                 }
             }
-            catch (NetworkInformationException)
-            {
-            }
-            return addresses;
-        });
+        }
 
         private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
-        // a peer's endpoint of the server's own listeners': of a relay to it, an allocation of the relay's, or a loop. Another
-        // allocation's relay is a peer as any is: two clients of one server relay to each other of theirs.
+        // a peer of the server's own: the unspecified addresses - of Linux, the host's own - its listeners, and of the host's
+        // addresses other than the loopback's - its interfaces', its relay addresses and the one it advertises - every port but
+        // those of its relays, as any service of the host's is of them, hidden as it may be of a firewall of the outside
+        // (RFC 8656 21.2.3). Another allocation's relay is a peer as any is: two clients of one server relay to each other of
+        // theirs. Of the loopback, the listeners alone: the default policy refuses the rest of it, and one that allows it, as
+        // tests do, means it.
         private bool IsOwn(IPEndPoint peer)
         {
             var address = Normalize(peer.Address);
-            bool local = IPAddress.IsLoopback(address) || LocalAddresses.Value.Contains(address)
-                || address.Equals(_options.RelayAddress) || address.Equals(_options.RelayAddressV6) || address.Equals(_options.AdvertisedRelayAddress);
+            if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
+                return true;
+            bool loopback = IPAddress.IsLoopback(address);
+            bool host = !loopback && (HostAddresses.Contains(address) || address.Equals(_options.RelayAddress) || address.Equals(_options.RelayAddressV6)
+                || address.Equals(_options.AdvertisedRelayAddress));
             lock (_sync)
             {
                 foreach (var listener in _listeners)
                 {
-                    if (listener.Port == peer.Port && (local && (listener.Address.Equals(IPAddress.Any) || listener.Address.Equals(IPAddress.IPv6Any)) || Normalize(listener.Address).Equals(address)))
+                    if (listener.Port == peer.Port && ((loopback || host) && (listener.Address.Equals(IPAddress.Any) || listener.Address.Equals(IPAddress.IPv6Any)) || Normalize(listener.Address).Equals(address)))
+                        return true;
+                }
+                return host && !IsRelayPort(peer.Port);
+            }
+        }
+
+        // under the lock: whether the port is of a relay of the server's, of an allocation of any client's
+        private bool IsRelayPort(int port)
+        {
+            foreach (var allocation in _allocations.Values)
+            {
+                foreach (var relay in allocation.Relays)
+                {
+                    if (relay.EndPoint.Port == port || relay.Advertised.Port == port)
                         return true;
                 }
             }
@@ -323,6 +371,21 @@ namespace SharpTurn
             if (peer == null || IsOwn(peer))
                 return false;
             return _options.AllowPeer == null || _options.AllowPeer(peer);
+        }
+
+        // whether a permission of the address may be installed: of its address alone, as a permission is of no port (RFC 8656
+        // 9) - of the unspecified addresses never; of the default policy, of a public address, as TurnPeers.IsPublic of an
+        // endpoint refuses port 0, which a permission's XOR-PEER-ADDRESS is of
+        private bool IsAllowedPermission(IPAddress address)
+        {
+            address = Normalize(address);
+            if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
+                return false;
+            if (_options.AllowPeer == null)
+                return true;
+            return _options.AllowPeer.Method == ((Func<IPEndPoint, bool>)TurnPeers.IsPublic).Method
+                ? TurnPeers.IsPublic(address)
+                : _options.AllowPeer(new IPEndPoint(address, 0));
         }
 
         /// <summary>The allocations there are.</summary>
@@ -428,14 +491,47 @@ namespace SharpTurn
 
             lock (_sync)
             {
-                // the reservations of EVEN-PORT ports too, as each holds a port as an allocation does
+                // the reservations of EVEN-PORT ports too, as each holds a port as an allocation does; and the allocations
+                // being made of other connections now, whose sockets are being bound outside the lock, that Allocates at once
+                // of many connections take no more than the quotas
+                int pendingOfUser = request.Username != null && _pendingOf.TryGetValue(request.Username, out int pending) ? pending : 0;
                 if (request.Username != null && _allocations.Values.Count(a => a.Username == request.Username)
-                    + _reservations.Values.Count(r => r.Username == request.Username) >= _options.MaxAllocationsPerUser)
+                    + _reservations.Values.Count(r => r.Username == request.Username) + pendingOfUser >= _options.MaxAllocationsPerUser)
                     return request.Error(TurnErrorCode.AllocationQuotaReached, "Allocation Quota Reached");
-                if (_allocations.Count + _reservations.Count >= _options.MaxAllocations)
+                if (_allocations.Count + _reservations.Count + _pending >= _options.MaxAllocations)
                     return request.Error(TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
+                _pending++;
+                if (request.Username != null)
+                    _pendingOf[request.Username] = pendingOfUser + 1;
             }
+            try
+            {
+                return AllocateRelays(request, message, key, tcp, token, evenPort, reserveNext, family, additionalFamily);
+            }
+            finally
+            {
+                lock (_sync)
+                {
+                    _pending--;
+                    if (request.Username != null && _pendingOf.TryGetValue(request.Username, out int pending))
+                    {
+                        if (pending <= 1)
+                            _pendingOf.Remove(request.Username);
+                        else
+                            _pendingOf[request.Username] = pending - 1;
+                    }
+                }
+            }
+        }
 
+        // the allocations being made now, of their quota's slot taken before their sockets are bound
+        private int _pending;
+        private readonly Dictionary<string, int> _pendingOf = new Dictionary<string, int>();
+
+        // of the slot of the quotas taken: the relays bound, and the allocation of them
+        private StunMessage AllocateRelays(StunServerRequest request, StunMessage message, string key, bool tcp, StunAttribute token, bool? evenPort, bool reserveNext,
+            AddressFamily family, AddressFamily? additionalFamily)
+        {
             DateTime expires = DateTime.UtcNow + Lifetime(message, false);
             var allocation = new Allocation
             {
@@ -567,15 +663,18 @@ namespace SharpTurn
                 if (peers.Any(p => allocation.RelayOf(p.AddressFamily) == null))
                     return request.Error(TurnErrorCode.PeerAddressFamilyMismatch, "Peer Address Family Mismatch");
             }
-            if (peers.Any(p => !IsAllowed(p)))
+            // of each address alone, as a permission is of no port (RFC 8656 9.1)
+            if (peers.Any(p => !IsAllowedPermission(p.Address)))
                 return request.Error(TurnErrorCode.Forbidden, "Forbidden");
             lock (_sync)
             {
-                int added = peers.Select(p => p.Address).Distinct().Count(a => !allocation.Permissions.ContainsKey(a));
+                // of the addresses the peers' datagrams are of: an IPv4 address mapped to IPv6 as the IPv4 one
+                var addresses = peers.Select(p => Normalize(p.Address)).Distinct().ToList();
+                int added = addresses.Count(a => !allocation.Permissions.ContainsKey(a));
                 if (allocation.Permissions.Count + added > _options.MaxPermissionsPerAllocation)
                     return request.Error(TurnErrorCode.InsufficientCapacity, "Insufficient Capacity");
-                foreach (var peer in peers)
-                    allocation.Permissions[peer.Address] = DateTime.UtcNow + PermissionLifetime;
+                foreach (var address in addresses)
+                    allocation.Permissions[address] = DateTime.UtcNow + PermissionLifetime;
             }
             return request.Success();
         }
@@ -590,6 +689,8 @@ namespace SharpTurn
             var peer = message.GetXorAddress(TurnAttributeType.XorPeerAddress);
             if (number == null || peer == null)
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
+            // of the endpoint the peer's datagrams are of: an IPv4 address mapped to IPv6 as the IPv4 one
+            peer = new IPEndPoint(Normalize(peer.Address), peer.Port);
             ushort channel = number.Value;
             if (channel < TurnConstants.MinChannel || channel > TurnConstants.MaxChannel)
                 return request.Error(StunErrorCode.BadRequest, "Bad Request");
@@ -612,7 +713,7 @@ namespace SharpTurn
                 if (other != null && other.Number != channel)
                     return request.Error(StunErrorCode.BadRequest, "Bad Request");
 
-                allocation.Channels[channel] = new Channel { Number = channel, Peer = peer, Expires = DateTime.UtcNow + ChannelLifetime };
+                allocation.AddChannel(new Channel { Number = channel, Peer = peer, Expires = DateTime.UtcNow + ChannelLifetime });
                 allocation.Permissions[peer.Address] = DateTime.UtcNow + PermissionLifetime;
             }
             return request.Success();
@@ -1106,16 +1207,27 @@ namespace SharpTurn
             {
                 if (_allocations.ContainsKey(connection.Key))
                     return request.Error(StunErrorCode.BadRequest, "Bad Request");
+                // of a CONNECTION-ID of no connection waiting, or of another user's: the connection closed once answered, that
+                // no one guesses the IDs of others' connections over it, one after another
                 if (!_tcpPeers.TryGetValue(id.Value, out peer) || peer.Bound || peer.Connecting || peer.Closed || peer.Allocation.Closed)
+                {
+                    connection.Handoff = Closing;
                     return request.Error(StunErrorCode.BadRequest, "Bad Request");
+                }
                 if (_options.Stun.Realm != null && peer.Allocation.Username != request.Username)
+                {
+                    connection.Handoff = Closing;
                     return request.Error(TurnErrorCode.WrongCredentials, "Wrong Credentials");
+                }
                 peer.Bound = true;
             }
             connection.Handoff = stream => RelayTcpAsync(peer, stream);
             Trace($"Connection {peer.Id} of {peer.Peer} bound to {connection.RemoteEndPoint}");
             return request.Success();
         }
+
+        // a connection taken over of nothing: closed once the response before is sent
+        private static Task Closing(Stream stream) => Task.CompletedTask;
 
         // a peer's connection and the client's data connection of it, each relayed to the other as it is - what the peer sent
         // before, left in its socket, first - until either ends, which ends the other (RFC 6062 5.4, 5.5)
@@ -1195,7 +1307,20 @@ namespace SharpTurn
         #region Lifetimes
 
         // what expired: relays and the allocations of none left, permissions, channels, reservations
+        // of a timer's thread: whatever a round of it throws - a handler's, a stream's - ends that round alone, never the process
         private void Sweep()
+        {
+            try
+            {
+                SweepOnce();
+            }
+            catch (Exception ex)
+            {
+                Trace($"Sweep failed: {ex.Message}");
+            }
+        }
+
+        private void SweepOnce()
         {
             var expired = new List<(Allocation, Relay)>();
             var released = new List<Socket>();
@@ -1211,7 +1336,7 @@ namespace SharpTurn
                     foreach (var address in allocation.Permissions.Where(p => p.Value <= now).Select(p => p.Key).ToList())
                         allocation.Permissions.Remove(address);
                     foreach (var number in allocation.Channels.Where(c => c.Value.Expires <= now).Select(c => c.Key).ToList())
-                        allocation.Channels.Remove(number);
+                        allocation.RemoveChannel(number);
                 }
                 foreach (var token in _reservations.Where(r => r.Value.Expires <= now).Select(r => r.Key).ToList())
                 {
@@ -1244,7 +1369,7 @@ namespace SharpTurn
                 foreach (var address in allocation.Permissions.Keys.Where(a => a.AddressFamily == relay.Family).ToList())
                     allocation.Permissions.Remove(address);
                 foreach (var channel in allocation.Channels.Values.Where(c => c.Peer.AddressFamily == relay.Family).ToList())
-                    allocation.Channels.Remove(channel.Number);
+                    allocation.RemoveChannel(channel.Number);
                 if (last)
                 {
                     allocation.Closed = true;

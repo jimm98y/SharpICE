@@ -40,6 +40,7 @@ SharpStun.IDtlsAssociation.NegotiatedVersion.get -> ushort
 SharpStun.IDtlsAssociation.Send(byte[] buffer, int offset, int count) -> void
 SharpStun.IDtlsServer
 SharpStun.IDtlsServer.Close(System.Net.IPEndPoint peer) -> void
+SharpStun.IDtlsServer.Count.get -> int
 SharpStun.IDtlsServer.HasAssociation(System.Net.IPEndPoint peer) -> bool
 SharpStun.IDtlsServer.Peers.get -> System.Collections.Generic.IReadOnlyCollection<System.Net.IPEndPoint>
 SharpStun.IDtlsServer.Receive(System.Net.IPEndPoint from, byte[] buffer, int offset, int count) -> void
@@ -72,8 +73,14 @@ SharpStun.StunDtlsTransport.NegotiatedVersion.get -> ushort
 SharpStun.StunDtlsTransport.Stack.get -> SharpStun.IDtlsStack
 SharpStun.StunServerOptions.DtlsStack.get -> SharpStun.IDtlsStack
 SharpStun.StunServerOptions.DtlsStack.set -> void
+SharpStun.StunServerOptions.MaxConnectionsPerAddress.get -> int
+SharpStun.StunServerOptions.MaxConnectionsPerAddress.set -> void
 SharpStun.StunServerOptions.TlsStack.get -> SharpStun.ITlsStack
 SharpStun.StunServerOptions.TlsStack.set -> void
+SharpStun.StunServerOptions.UnauthenticatedIdleTimeout.get -> System.TimeSpan
+SharpStun.StunServerOptions.UnauthenticatedIdleTimeout.set -> void
+SharpStun.StunServerOptions.WriteTimeout.get -> System.TimeSpan
+SharpStun.StunServerOptions.WriteTimeout.set -> void
 SharpStun.StunStreamTransport.TlsStack.get -> SharpStun.ITlsStack
 SharpStun.SystemTlsStack
 SharpStun.SystemTlsStack.ConnectAsync(System.IO.Stream inner, SharpStun.TlsClientSettings settings, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.IO.Stream>

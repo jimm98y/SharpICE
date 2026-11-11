@@ -332,7 +332,10 @@ namespace SharpStun
                     case StunErrorCode.TryAlternate:
                         // of the address family of the request, to a server it has not been to (RFC 8489 10)
                         var alternate = response.AlternateServers.FirstOrDefault(s => s.AddressFamily == _transport.RemoteEndPoint.AddressFamily);
-                        if (alternate == null || visited.Contains(alternate) || !await RedirectAsync(alternate, response.AlternateDomain, cancellationToken).ConfigureAwait(false))
+                        // its ALTERNATE-DOMAIN, the name the next server's certificate is checked of, of a response of
+                        // MESSAGE-INTEGRITY-SHA256 alone, as a server sends it of no other (RFC 8489 10); else the name of this one
+                        string domain = key != null && response.HasIntegritySha256 ? response.AlternateDomain : null;
+                        if (alternate == null || visited.Contains(alternate) || !await RedirectAsync(alternate, domain, cancellationToken).ConfigureAwait(false))
                             return response;
                         visited.Add(alternate);
                         break;
@@ -546,12 +549,23 @@ namespace SharpStun
                     algorithm = (StunPasswordAlgorithm)first.Value;
                 }
 
+                // of a realm OpaqueString refuses - empty, of control characters - of a server's, of no credentials of it: the
+                // challenge not taken, as of no answer it would take
+                byte[] key;
+                try
+                {
+                    key = StunCredentials.LongTermKey(_options.Username, realm, _options.Password, algorithm);
+                }
+                catch (ArgumentException)
+                {
+                    return false;
+                }
                 _realm = realm;
                 _nonce = nonce;
                 _passwordAlgorithms = algorithmsAttribute?.Value;
                 _passwordAlgorithm = algorithm;
                 _useUserhash = (features & StunSecurityFeatures.UsernameAnonymity) != 0;
-                _key = StunCredentials.LongTermKey(_options.Username, realm, _options.Password, algorithm);
+                _key = key;
                 IsAuthenticated = false;
                 return true;
             }
@@ -569,13 +583,22 @@ namespace SharpStun
 
             lock (_sync)
             {
-                _nonce = nonce;
                 string realm = response.Realm;
                 if (realm != null && realm != _realm)
                 {
+                    byte[] key;
+                    try
+                    {
+                        key = StunCredentials.LongTermKey(_options.Username, realm, _options.Password, _passwordAlgorithm);
+                    }
+                    catch (ArgumentException)
+                    {
+                        return false;
+                    }
                     _realm = realm;
-                    _key = StunCredentials.LongTermKey(_options.Username, realm, _options.Password, _passwordAlgorithm);
+                    _key = key;
                 }
+                _nonce = nonce;
                 return true;
             }
         }

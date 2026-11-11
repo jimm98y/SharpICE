@@ -120,12 +120,42 @@ namespace SharpStun
         private readonly StunMessageEventArgs _messageArgs = new StunMessageEventArgs();
         private readonly StunDataEventArgs _dataArgs = new StunDataEventArgs();
 
-        protected void OnMessageReceived(StunMessage message, IPEndPoint from) => MessageReceived?.Invoke(this, _messageArgs.Set(message, from));
+        // of the transport's one receiving loop: whatever a handler of an event throws - an application's, of what a peer or
+        // the server sent - is the handler's alone, never the loop's, which would end of it, the client's every transaction
+        // and its allocation with it, of no Closed told of
+        protected void OnMessageReceived(StunMessage message, IPEndPoint from)
+        {
+            try
+            {
+                MessageReceived?.Invoke(this, _messageArgs.Set(message, from));
+            }
+            catch (Exception)
+            {
+            }
+        }
 
-        protected void OnClosed(Exception error) => Closed?.Invoke(this, error);
+        protected void OnClosed(Exception error)
+        {
+            try
+            {
+                Closed?.Invoke(this, error);
+            }
+            catch (Exception)
+            {
+            }
+        }
 
         /// <summary>ChannelData, of the buffer it was read into: the transport's own again once the event returns.</summary>
-        protected void OnDataReceived(byte[] buffer, int offset, int count) => DataReceived?.Invoke(this, _dataArgs.Set(buffer, offset, count));
+        protected void OnDataReceived(byte[] buffer, int offset, int count)
+        {
+            try
+            {
+                DataReceived?.Invoke(this, _dataArgs.Set(buffer, offset, count));
+            }
+            catch (Exception)
+            {
+            }
+        }
 
         /// <summary>
         /// A transport of the same protocol to another server, of an ALTERNATE-SERVER (RFC 8489 10): of TLS, its certificate of
@@ -260,6 +290,9 @@ namespace SharpStun
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private readonly IPEndPoint _localEndPoint;
 
+        // how long a client's TLS handshake is given
+        private static readonly TimeSpan TlsHandshakeTimeout = TimeSpan.FromSeconds(10);
+
         private StunStreamTransport(TcpClient client, Stream stream, IPEndPoint server, string tlsHost, RemoteCertificateValidationCallback validation, ITlsStack tlsStack)
         {
             _client = client;
@@ -296,11 +329,24 @@ namespace SharpStun
                 Stream stream = client.GetStream();
                 if (tlsHost != null)
                 {
-                    stream = await tlsStack.ConnectAsync(stream, new TlsClientSettings
+                    // of a handshake of its own deadline: a server that takes the connection and answers nothing holds it not
+                    // for ever, as the URI's other servers are to be tried
+                    using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                     {
-                        ServerName = tlsHost,
-                        ValidateServerCertificate = chain => DtlsCertificates.Validate(chain, tlsHost, validation, client),
-                    }, cancellationToken).ConfigureAwait(false);
+                        handshake.CancelAfter(TlsHandshakeTimeout);
+                        try
+                        {
+                            stream = await tlsStack.ConnectAsync(stream, new TlsClientSettings
+                            {
+                                ServerName = tlsHost,
+                                ValidateServerCertificate = chain => DtlsCertificates.Validate(chain, tlsHost, validation, client),
+                            }, handshake.Token).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            throw new IOException("The TLS handshake timed out.", ex);
+                        }
+                    }
                 }
                 return new StunStreamTransport(client, stream, server, tlsHost, validation, tlsStack);
             }

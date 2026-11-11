@@ -24,6 +24,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpStun", "SharpStun\Shar
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpTurn", "SharpTurn\SharpTurn.csproj", "{059734D6-2895-4F08-B799-60186DB9A076}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpICE.ChromeInterop", "SharpICE.ChromeInterop\SharpICE.ChromeInterop.csproj", "{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -118,6 +120,18 @@ Global
 		{059734D6-2895-4F08-B799-60186DB9A076}.Release|x64.Build.0 = Release|Any CPU
 		{059734D6-2895-4F08-B799-60186DB9A076}.Release|x86.ActiveCfg = Release|Any CPU
 		{059734D6-2895-4F08-B799-60186DB9A076}.Release|x86.Build.0 = Release|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Debug|x64.Build.0 = Debug|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Debug|x86.Build.0 = Debug|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Release|x64.ActiveCfg = Release|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Release|x64.Build.0 = Release|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Release|x86.ActiveCfg = Release|Any CPU
+		{0FE0B4AB-E10A-4E47-BC79-83C65F0C3540}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

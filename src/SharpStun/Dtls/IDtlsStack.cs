@@ -120,6 +120,9 @@ namespace SharpStun
         /// <summary>The peers of an association, of <see cref="HasAssociation"/>.</summary>
         IReadOnlyCollection<IPEndPoint> Peers { get; }
 
+        /// <summary>How many peers have an association, of <see cref="HasAssociation"/>: of no copy of them.</summary>
+        int Count { get; }
+
         /// <summary>The bytes as one record's data to the peer, the caller's again once it returns.</summary>
         /// <exception cref="System.IO.IOException">Of no established association of the peer's.</exception>
         void Send(IPEndPoint peer, byte[] buffer, int offset, int count);

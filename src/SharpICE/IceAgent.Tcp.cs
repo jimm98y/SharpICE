@@ -375,8 +375,10 @@ namespace SharpICE
                     connection = new IceTcpConnection(client, stream);
                 }
             }
-            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is OperationCanceledException || ex is InvalidOperationException)
+            catch (Exception ex)
             {
+                // of whatever a TLS stack throws: its slot released and its socket closed all the same below, else of a few
+                // of a kind not caught, no connection of TLS would be taken again
                 Trace($"TLS of {SafeRemote(client)} failed: {ex.Message}");
             }
 
