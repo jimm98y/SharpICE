@@ -4,7 +4,7 @@
 		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
 		<Nullable>disable</Nullable>
 		<Title>$(ProjectName)</Title>
-		<Version>0.1.0</Version>
+		<Version>0.0.1</Version>
 		<Authors>Lukas Volf</Authors>
 		<Copyright>MIT</Copyright>
 		<PackageProjectUrl>https://github.com/jimm98y/SharpICE</PackageProjectUrl>
@@ -16,6 +16,7 @@
 		<AssemblyVersion>1.0.0</AssemblyVersion>
 		<FileVersion>$(Version)</FileVersion>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
+		<Description>STUN, TURN and ICE written in C#.</Description>
 		<LangVersion>14.0</LangVersion>
 	</PropertyGroup>
 
