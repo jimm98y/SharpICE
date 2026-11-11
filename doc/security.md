@@ -8,6 +8,8 @@ The STUN, TURN, ICE and DTLS/TLS code was reviewed against attackers who send ar
 
 ### Fixed
 
+The SharpDTLS fixes ship in its 0.0.2 package, which SharpICE references.
+
 | Area | Issue | Fix |
 |---|---|---|
 | TURN | Relays could reach services on the server's own host on any port other than its listeners (TURN SSRF); `0.0.0.0` was not refused | The host's addresses are refused on every port except those of live relays; the unspecified addresses always are; the host's addresses are re-read every minute |
@@ -44,7 +46,7 @@ The STUN, TURN, ICE and DTLS/TLS code was reviewed against attackers who send ar
 | ICE-TCP/TLS | An unexpected exception during a TLS handshake leaked its connection slot | Released in all cases |
 | ICE-TCP | A check replayed over a connection to a passive candidate paired it, and the connection stayed open | Closed unless a check of the agent's own succeeds on it in time (a lite agent keeps it once paired) |
 | ICE-TCP | Writes over a TURN TCP relay's data connection had no timeout: a peer that read nothing blocked the agent's timer, and with it every check and consent | Every ICE-TCP write is bounded by 5 s; past it the connection is closed |
-| SharpDTLS | A table of fragmented ClientHellos, filled with spoofed first fragments, refused every new client | The oldest entry is evicted (SharpDTLS `main`, referenced as a project) |
+| SharpDTLS | A table of fragmented ClientHellos, filled with spoofed first fragments, refused every new client | The oldest entry is evicted |
 | SharpDTLS | One spoofed unencrypted record (DTLS 1.2 and 1.3) ended an established association | Unencrypted records are dropped once the handshake is done; before that, malformed ones are dropped |
 | SharpDTLS | Spoofed duplicate ClientHellos made a DTLS 1.3 server resend its whole flight each time (amplification) | At most one resend every 100 ms |
 | SharpDTLS | Its UDP server transport started a thread for every source address, spoofed or not, and never stopped it | One receive thread; no state per source |

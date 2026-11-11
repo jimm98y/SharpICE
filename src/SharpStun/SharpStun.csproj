@@ -18,8 +18,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- DTLS and TLS of STUN and TURN, and TLS of ICE-TCP; SharpDTLS main, for fixes made after its 0.0.1 package -->
-    <ProjectReference Include="..\..\..\SharpDTLS\src\SharpDTLS\SharpDTLS.csproj" />
+    <!-- DTLS and TLS of STUN and TURN, and TLS of ICE-TCP -->
+    <PackageReference Include="SharpDTLS" Version="0.0.2" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'net472'">
