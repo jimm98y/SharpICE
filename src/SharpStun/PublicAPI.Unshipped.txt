@@ -103,3 +103,5 @@ static SharpStun.TlsStacks.BouncyCastle.get -> SharpStun.ITlsStack
 static SharpStun.TlsStacks.Default.get -> SharpStun.ITlsStack
 static SharpStun.TlsStacks.SharpDtls.get -> SharpStun.ITlsStack
 static SharpStun.TlsStacks.System.get -> SharpStun.ITlsStack
+SharpStun.StunServerOptions.MaxDtlsPeersPerAddress.get -> int
+SharpStun.StunServerOptions.MaxDtlsPeersPerAddress.set -> void

@@ -251,6 +251,13 @@ namespace SharpStun
         public int MaxDtlsPeers { get; set; } = 1000;
 
         /// <summary>
+        /// The associations of DTLS of one source address at most at once of each listener, of either DTLS stack: past them, a
+        /// new one of it is closed as its handshake is done - after its cookie exchange, so that a source forged counts not -
+        /// that one host takes not every slot of <see cref="MaxDtlsPeers"/>. Of clients behind one NAT, more.
+        /// </summary>
+        public int MaxDtlsPeersPerAddress { get; set; } = 100;
+
+        /// <summary>
         /// How long a connection of TCP or TLS has for its TLS handshake and its first message: past it, it is closed, as one
         /// that sends nothing would hold its socket for ever.
         /// </summary>
@@ -402,9 +409,30 @@ namespace SharpStun
                 SendDatagram = (to, buffer, offset, count) => sender.SendTo(buffer, offset, count, to),
                 Established = from =>
                 {
-                    var peer = peers.GetOrAdd(from, _ => new DtlsPeer());
-                    peer.LastReceived = DateTime.UtcNow;
-                    peer.Connection = new StunServerConnection(StunServerProtocol.Dtls, local, from, (data, offset, length) => dtls.Send(from, data, offset, length));
+                    lock (peers)
+                    {
+                        int ofAddress = peers.Count(p => p.Value.Connection != null && !p.Key.Equals(from) && p.Key.Address.Equals(from.Address));
+                        if (ofAddress >= _options.MaxDtlsPeersPerAddress)
+                        {
+                            Trace($"DTLS of {from} refused: {_options.MaxDtlsPeersPerAddress} of its address already");
+                            // off the stack's own thread, which tells of the handshake done
+                            ThreadPool.QueueUserWorkItem(_ =>
+                            {
+                                try
+                                {
+                                    dtls.Close(from);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Trace($"DTLS of {from} not closed: {ex.Message}");
+                                }
+                            });
+                            return;
+                        }
+                        var peer = peers.GetOrAdd(from, _ => new DtlsPeer());
+                        peer.LastReceived = DateTime.UtcNow;
+                        peer.Connection = new StunServerConnection(StunServerProtocol.Dtls, local, from, (data, offset, length) => dtls.Send(from, data, offset, length));
+                    }
                     Trace($"DTLS of {from}");
                 },
                 RecordReceived = (from, buffer, offset, count) =>

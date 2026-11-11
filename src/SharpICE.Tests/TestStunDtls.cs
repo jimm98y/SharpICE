@@ -99,6 +99,55 @@ namespace SharpICE.Tests
             Assert.IsNotNull(await client.GetMappedAddressAsync());
         }
 
+        // one address holds at most MaxDtlsPeersPerAddress associations, of either stack: the one past them is closed once its
+        // handshake is done, and answered nothing
+        [TestMethod]
+        [DataRow("sharp")]
+        [DataRow("bc")]
+        public async Task CapsTheAssociationsOfOneAddress(string stack)
+        {
+            using var certificate = CreateCertificate("localhost");
+            using var server = new StunServer(new StunServerOptions { Certificate = certificate, DtlsStack = Stack(stack), MaxDtlsPeersPerAddress = 2 });
+            var dtls = server.ListenDtls(new IPEndPoint(IPAddress.Loopback, 0));
+
+            var clients = new List<StunClient>();
+            try
+            {
+                for (int i = 0; i < 2; i++)
+                {
+                    var options = DtlsOptions();
+                    options.DtlsStack = Stack(stack);
+                    var client = new StunClient(options);
+                    clients.Add(client);
+                    await client.ConnectAsync("stuns:localhost:" + dtls.Port);
+                    Assert.IsNotNull(await client.GetMappedAddressAsync(), "within the cap: " + i);
+                }
+
+                var thirdOptions = DtlsOptions();
+                thirdOptions.DtlsStack = Stack(stack);
+                var third = new StunClient(thirdOptions);
+                clients.Add(third);
+                IPEndPoint mapped = null;
+                try
+                {
+                    await third.ConnectAsync("stuns:localhost:" + dtls.Port);
+                    mapped = await third.GetMappedAddressAsync();
+                }
+                catch (Exception ex) when (ex is StunException || ex is System.IO.IOException || ex is System.Security.Authentication.AuthenticationException || ex is ObjectDisposedException)
+                {
+                }
+                Assert.IsNull(mapped, "an association past the cap was answered");
+
+                // the ones within it go on
+                Assert.IsNotNull(await clients[0].GetMappedAddressAsync());
+            }
+            finally
+            {
+                foreach (var client in clients)
+                    client.Dispose();
+            }
+        }
+
         [TestMethod]
         [DataRow("sharp")]
         [DataRow("bc")]

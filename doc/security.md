@@ -52,6 +52,7 @@ The STUN, TURN, ICE and DTLS/TLS code was reviewed against attackers who send ar
 | SharpDTLS | TLS servers had no handshake timeout; `TlsStream` buffered received data without limit; small records cost quadratic time | 30 s handshake timeout and a cap on pending handshakes; at most 1 MiB buffered; linear buffering |
 | ICE-TCP | One host could take every connection slot of the passive candidates | `MaxTcpConnectionsPerAddress` (16), counting connections still in their TLS handshake |
 | SharpDTLS | One address could hold every DTLS association | `MaxConnectionsPerAddress` (100), checked after the cookie exchange |
+| STUN/TURN server | With the BouncyCastle DTLS stack, one address could hold every DTLS association | `MaxDtlsPeersPerAddress` (100), for either stack, counted once a handshake is done |
 | SharpDTLS | A truncated TLS connection read the same as one closed with close_notify | `CloseNotifyReceived` tells them apart |
 | SharpDTLS | Other hardening | TLS 1.2 defaults to forward-secret AEAD suites, no SHA-1 signatures, DH primes of 2048 bits; exporters need the extended master secret; a DTLS connection cap; constant-time DTLS 1.2 cookies; duplicate TLS 1.3 extensions refused; caps on empty records, warnings and ACK lists; ticket keys rotate |
 
@@ -60,7 +61,6 @@ The STUN, TURN, ICE and DTLS/TLS code was reviewed against attackers who send ar
 - **UDP reflection**: a 401 is still a few times the size of its request, as RFC 8489 specifies; rate-limit at the network if a server sees it abused.
 - **Nonce replay**: nonces are stateless, bound to the source for `NonceLifetime`, as RFC 8489 allows.
 - **Relayed writes**: a TURN relay writes to a TCP/TLS client synchronously; a client that reads nothing costs a thread for up to `WriteTimeout` before it is closed.
-- **Per-source caps on DTLS with BouncyCastle**: with the default SharpDTLS stack, one address may hold at most 100 DTLS associations (SharpDTLS's `DtlsServer.MaxConnectionsPerAddress`, counted once its cookie exchange proves the address); with `DtlsStacks.BouncyCastle` only the global `MaxDtlsPeers` applies. ICE-TCP has `MaxTcpConnectionsPerAddress` (16) as well as `MaxTcpConnections`.
 - **TCP relay ports** are bound with address reuse, because Connect's outgoing connections are made from them; on Windows another local process could bind one too.
 - **ICE-TCP over TLS** authenticates no certificate (see `IceAgentOptions.IncludeTls`).
 - **Exportable keys**: DTLS, and TLS with SharpDTLS or BouncyCastle, need a certificate with an exportable private key; TLS with `TlsStacks.System` does not.
