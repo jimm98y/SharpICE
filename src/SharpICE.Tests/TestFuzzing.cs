@@ -277,7 +277,7 @@ namespace SharpICE.Tests
                 _ = candidate.EndPoint;
                 _ = candidate.TcpType;
                 _ = candidate.LocalPreference;
-                _ = candidate.IsStream;
+                _ = candidate.IsTcp;
                 IceCandidate.Parse(candidate.ToString());
             });
             Fuzz("StunUri.Parse", _ => Encoding.UTF8.GetBytes(mutator.NextText(uris)), data =>
@@ -541,7 +541,6 @@ namespace SharpICE.Tests
                 IncludeLoopback = true,
                 AddressFilter = address => IPAddress.IsLoopback(address) && address.AddressFamily == AddressFamily.InterNetwork,
                 IncludeTcp = true,
-                IncludeTls = true,
                 MdnsCandidates = true,
                 TcpCheckTimeout = TimeSpan.FromSeconds(2),
             };
@@ -570,7 +569,7 @@ namespace SharpICE.Tests
             // of mDNS candidates, of names: their sockets of the loopback, of the port told of
             var udpEndPoint = new IPEndPoint(IPAddress.Loopback, udp.Port);
             SendDatagrams(udpEndPoint, mutator, ListenerIterations);
-            foreach (var passive in agent.LocalCandidates.Where(c => c.IsStream && c.TcpType == IceCandidate.TcpPassive))
+            foreach (var passive in agent.LocalCandidates.Where(c => c.IsTcp && c.TcpType == IceCandidate.TcpPassive))
             {
                 // RFC 4571 frames of mutants, and of lengths of their own
                 var framed = new Mutator(8, seeds.Select(s => new byte[] { (byte)(s.Length >> 8), (byte)s.Length }.Concat(s).ToArray()));

@@ -290,6 +290,18 @@ namespace SharpICE.Tests
             Assert.AreEqual(IceCandidateType.Host, controlling.SelectedPair.Remote.Type, "of the name's address, not learnt of the peer's checks");
         }
 
+        // "tls" is no registered transport: a peer's candidate of it is left out (RFC 8839 5.1), as of any transport unknown
+        [TestMethod]
+        public void LeavesOutACandidateOfTls()
+        {
+            var options = Loopback(IceRole.Controlling);
+            options.IncludeTcp = true;
+            using var agent = new IceAgent(options);
+            Assert.IsFalse(agent.AddRemoteCandidate("candidate:1 1 tls 2130706431 127.0.0.1 50000 typ host tcptype passive"));
+            Assert.IsTrue(agent.AddRemoteCandidate("candidate:2 1 tcp 2130706431 127.0.0.1 50001 typ host tcptype passive"));
+            Assert.AreEqual(1, agent.RemoteCandidates.Count);
+        }
+
         [TestMethod]
         public async Task LeavesOutACandidateOfAnMdnsNameNoOneAnswers()
         {

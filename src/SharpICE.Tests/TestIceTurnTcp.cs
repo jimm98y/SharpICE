@@ -121,7 +121,7 @@ namespace SharpICE.Tests
             Assert.AreEqual(9, active.Port, "an active candidate is of port 9 (RFC 6544 4.5)");
             Assert.AreEqual(passive.Address, active.Address);
             Assert.AreEqual(passive.Foundation, active.Foundation);
-            Assert.IsTrue(passive.Priority < IceCandidate.ComputePriority(IceCandidateType.ServerReflexive, 0, 1, "tcp"), "below every other type");
+            Assert.IsTrue(passive.Priority < IceCandidate.ComputePriority(IceCandidateType.ServerReflexive, 0, 1, true), "below every other type");
             Assert.AreEqual(2, server.AllocationCount, "a UDP allocation over TCP, and a TCP one");
         }
 

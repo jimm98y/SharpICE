@@ -43,7 +43,6 @@ The SharpDTLS fixes ship in its 0.0.2 package, which SharpICE references.
 | ICE | mDNS answers were accepted from off-link sources | On-link only |
 | ICE | Data was accepted from any signalled address of a pair | Only from pairs whose peer authenticated |
 | ICE | Each 487 to a check flipped the current role, so several in flight made the role flap | The agent switches only if it is still in the role the check was sent in (RFC 8445 7.2.5.1) |
-| ICE-TCP/TLS | An unexpected exception during a TLS handshake leaked its connection slot | Released in all cases |
 | ICE-TCP | A check replayed over a connection to a passive candidate paired it, and the connection stayed open | Closed unless a check of the agent's own succeeds on it in time (a lite agent keeps it once paired) |
 | ICE-TCP | Writes over a TURN TCP relay's data connection had no timeout: a peer that read nothing blocked the agent's timer, and with it every check and consent | Every ICE-TCP write is bounded by 5 s; past it the connection is closed |
 | SharpDTLS | A table of fragmented ClientHellos, filled with spoofed first fragments, refused every new client | The oldest entry is evicted |
@@ -52,7 +51,7 @@ The SharpDTLS fixes ship in its 0.0.2 package, which SharpICE references.
 | SharpDTLS | Its UDP server transport started a thread for every source address, spoofed or not, and never stopped it | One receive thread; no state per source |
 | SharpDTLS | A TLS client or server with no validator accepted any certificate | The chain is validated against the system trust store by default (SharpICE always sets its own validator) |
 | SharpDTLS | TLS servers had no handshake timeout; `TlsStream` buffered received data without limit; small records cost quadratic time | 30 s handshake timeout and a cap on pending handshakes; at most 1 MiB buffered; linear buffering |
-| ICE-TCP | One host could take every connection slot of the passive candidates | `MaxTcpConnectionsPerAddress` (16), counting connections still in their TLS handshake |
+| ICE-TCP | One host could take every connection slot of the passive candidates | `MaxTcpConnectionsPerAddress` (16), counting relayed connections still being set up |
 | SharpDTLS | One address could hold every DTLS association | `MaxConnectionsPerAddress` (100), checked after the cookie exchange |
 | STUN/TURN server | With the BouncyCastle DTLS stack, one address could hold every DTLS association | `MaxDtlsPeersPerAddress` (100), for either stack, counted once a handshake is done |
 | SharpDTLS | A truncated TLS connection read the same as one closed with close_notify | `CloseNotifyReceived` tells them apart |
@@ -64,13 +63,12 @@ The SharpDTLS fixes ship in its 0.0.2 package, which SharpICE references.
 - **Nonce replay**: nonces are stateless, bound to the source for `NonceLifetime`, as RFC 8489 allows.
 - **Relayed writes**: a TURN relay writes to a TCP/TLS client synchronously; a client that reads nothing costs a thread for up to `WriteTimeout` before it is closed.
 - **TCP relay ports** are bound with address reuse, because Connect's outgoing connections are made from them; on Windows another local process could bind one too.
-- **ICE-TCP over TLS** authenticates no certificate (see `IceAgentOptions.IncludeTls`).
 - **Exportable keys**: DTLS, and TLS with SharpDTLS or BouncyCastle, need a certificate with an exportable private key; TLS with `TlsStacks.System` does not.
 - **Replayed checks and data**: a check replayed from a new source still creates a peer reflexive candidate (within its cap) whose data is accepted, as MESSAGE-INTEGRITY does not cover the source address; DTLS on top authenticates the data itself.
 
 ## Fuzzing
 
-`TestFuzzing` mutates well-formed inputs with bit flips, extreme lengths, truncations, insertions and splices. The inputs are STUN and TURN messages, ChannelData, ICE candidates, URIs, DNS responses, and real DTLS and TLS ClientHellos from each stack. The mutants go to the parsers, where no exception may escape, and to live listeners: STUN/TURN over UDP, TCP, TLS and DTLS with each stack, an ICE agent's UDP socket, its passive TCP/TLS candidates and its mDNS responder. Each listener must still answer a well-formed request afterwards. It runs 20,000 mutants per parser by default; for a deeper run:
+`TestFuzzing` mutates well-formed inputs with bit flips, extreme lengths, truncations, insertions and splices. The inputs are STUN and TURN messages, ChannelData, ICE candidates, URIs, DNS responses, and real DTLS and TLS ClientHellos from each stack. The mutants go to the parsers, where no exception may escape, and to live listeners: STUN/TURN over UDP, TCP, TLS and DTLS with each stack, an ICE agent's UDP socket, its passive TCP candidates and its mDNS responder. Each listener must still answer a well-formed request afterwards. It runs 20,000 mutants per parser by default; for a deeper run:
 
 ```
 SHARPICE_FUZZ_ITERATIONS=1000000 dotnet test src/SharpICE.Tests --filter FullyQualifiedName~TestFuzzing

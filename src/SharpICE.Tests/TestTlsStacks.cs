@@ -15,8 +15,8 @@ using System.Threading.Tasks;
 namespace SharpICE.Tests
 {
     /// <summary>
-    /// The TLS stacks of each other: STUN over TLS of each client's of each server's, a certificate refused of each, a TCP
-    /// allocation's data connection of each, and ICE-TCP over TLS of each.
+    /// The TLS stacks of each other: STUN over TLS of each client's of each server's, a certificate refused of each, and a
+    /// TCP allocation's data connection of each.
     /// </summary>
     [TestClass]
     public class TestTlsStacks
@@ -186,50 +186,6 @@ namespace SharpICE.Tests
             {
                 listener.Stop();
             }
-        }
-
-        [TestMethod]
-        [DataRow("sharp", "sharp")]
-        [DataRow("bc", "bc")]
-        [DataRow("system", "system")]
-        [DataRow("sharp", "system")]
-        [DataRow("bc", "sharp")]
-        public async Task ConnectsOverIceTcpOfTls(string controllingStack, string controlledStack)
-        {
-            IceAgentOptions Options(IceRole role, string stack) => new IceAgentOptions
-            {
-                Role = role,
-                IncludeLoopback = true,
-                AddressFilter = address => IPAddress.IsLoopback(address) && address.AddressFamily == AddressFamily.InterNetwork,
-                IncludeUdp = false,
-                IncludeTls = true,
-                TlsStack = Stack(stack),
-            };
-            using var controlling = new IceAgent(Options(IceRole.Controlling, controllingStack));
-            using var controlled = new IceAgent(Options(IceRole.Controlled, controlledStack));
-            await controlling.GatherCandidatesAsync();
-            await controlled.GatherCandidatesAsync();
-            controlling.SetRemoteCredentials(controlled.LocalUfrag, controlled.LocalPassword);
-            controlled.SetRemoteCredentials(controlling.LocalUfrag, controlling.LocalPassword);
-            foreach (var candidate in controlled.LocalCandidates)
-                controlling.AddRemoteCandidate(candidate.ToString());
-            foreach (var candidate in controlling.LocalCandidates)
-                controlled.AddRemoteCandidate(candidate.ToString());
-            controlling.Start();
-            controlled.Start();
-
-            DateTime deadline = DateTime.UtcNow + Timeout;
-            while (!(controlling.SelectedPair?.Nominated == true && controlled.SelectedPair?.Nominated == true) && DateTime.UtcNow < deadline)
-                await Task.Delay(20);
-            Assert.IsTrue(controlling.SelectedPair?.Nominated == true && controlled.SelectedPair?.Nominated == true, "connected");
-            Assert.IsTrue(controlling.SelectedPair.IsTls);
-
-            var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            controlled.DataReceived += (s, e) => received.TrySetResult(Encoding.UTF8.GetString(e.Buffer, e.Offset, e.Count));
-            byte[] bytes = Encoding.UTF8.GetBytes("of TLS");
-            Assert.IsTrue(controlling.Send(bytes, 0, bytes.Length));
-            Assert.AreSame(received.Task, await Task.WhenAny(received.Task, Task.Delay(Timeout)));
-            Assert.AreEqual("of TLS", await received.Task);
         }
     }
 }

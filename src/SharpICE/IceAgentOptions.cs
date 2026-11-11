@@ -75,7 +75,7 @@ namespace SharpICE
         public SharpStun.IDtlsStack DtlsStack { get; set; } = SharpStun.DtlsStacks.Default;
 
         /// <summary>
-        /// The TLS implementation of a TURN server of TLS ("turns:..."), and of ICE-TCP over TLS (<see cref="IncludeTls"/>): of
+        /// The TLS implementation of a TURN server of TLS ("turns:..."): of
         /// <see cref="SharpStun.TlsStacks.SharpDtls"/>, the default, TLS 1.3 and 1.2; of
         /// <see cref="SharpStun.TlsStacks.BouncyCastle"/>, TLS 1.2; of <see cref="SharpStun.TlsStacks.System"/>,
         /// .NET's SslStream.
@@ -103,25 +103,6 @@ namespace SharpICE
         /// lets TCP alone through; UDP's are preferred over them.
         /// </summary>
         public bool IncludeTcp { get; set; } = false;
-
-        /// <summary>
-        /// Whether to gather candidates of ICE-TCP over TLS, of SharpDTLS: of each address, a passive and an active one as of
-        /// <see cref="IncludeTcp"/>, each connection of them of TLS 1.3 or 1.2 - the active side its client - and of transport
-        /// "tls" in SDP. Of a peer past a firewall that lets TLS alone through; TCP's are preferred over them. No other agent
-        /// signals these, so both peers are to be of SharpICE.
-        /// </summary>
-        /// <remarks>
-        /// The TLS of them hides the checks and the data from the network, and passes a firewall; it authenticates no one, for
-        /// the peer's certificate is known of nothing signalled: what does is ICE's own MESSAGE-INTEGRITY of each check, and
-        /// DTLS-SRTP's fingerprint of the media.
-        /// </remarks>
-        public bool IncludeTls { get; set; } = false;
-
-        /// <summary>
-        /// The certificate the passive candidates of TLS answer of, its private key exportable; of none, one of the agent's
-        /// own, self-signed.
-        /// </summary>
-        public System.Security.Cryptography.X509Certificates.X509Certificate2 TlsCertificate { get; set; }
 
         /// <summary>
         /// Whether the agent is an ICE lite one (RFC 8445 2.5): of host candidates alone, it sends no checks and answers the
@@ -152,7 +133,7 @@ namespace SharpICE
         public int MaxTcpConnections { get; set; } = 32;
 
         /// <summary>
-        /// The connections of ICE-TCP one source address may hold at once, established or in their TLS handshake, so one
+        /// The connections of ICE-TCP one source address may hold at once, established or still being set up, so one
         /// host can't take every slot of <see cref="MaxTcpConnections"/>; 0 for no limit.
         /// </summary>
         public int MaxTcpConnectionsPerAddress { get; set; } = 16;
