@@ -25,7 +25,9 @@ using ReadTask = System.Threading.Tasks.ValueTask<bool>;
 using ReadTask = System.Threading.Tasks.Task<bool>;
 #endif
 using SharpDTLS;
+using SharpStunClient;
 using SharpStunCommon;
+using SharpTurnClient;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -55,10 +57,146 @@ namespace SharpICE
         // of TLS: the server the passive candidates' connections are answered of, of the agent's certificate
         private TlsServer _tlsServer;
 
-        // of TLS: the connections to passive candidates whose handshakes are under way, of the connections' limit too
-        private int _tlsHandshakes;
+        // the connections to passive candidates being made - of a TLS handshake, or of a relay's ConnectionBind - of the
+        // connections' limit too
+        private int _pendingConnections;
 
         private void GatherTcp(List<IPAddress> addresses, List<IceCandidate> gathered) => GatherStream(addresses, gathered, false);
+
+        // the clients of the TCP allocations of the relayed candidates of TCP: of the peers' permissions on them
+        private readonly List<TurnClient> _tcpRelays = new List<TurnClient>();
+
+        // relayed candidates of TCP (RFC 6544 5.1, of a TCP allocation of RFC 6062): the relayed address a passive candidate,
+        // the peers' connections to it told of of ConnectionAttempts; and an active one, of port 9, which connects to the
+        // peer's passive ones of Connect. Each connection of them framed as of any of TCP (RFC 4571).
+        private void GatherTcpRelayed(TurnClient turn, int index, List<IceCandidate> gathered)
+        {
+            var relayed = turn.RelayedEndPoint;
+            if (relayed == null)
+                return;
+            string foundation = "rt" + (index + 1).ToString(CultureInfo.InvariantCulture);
+            // of mDNS candidates, no address of the host's
+            string relatedAddress = _mdns != null || turn.MappedEndPoint == null ? NoAddress(relayed.AddressFamily) : turn.MappedEndPoint.Address.ToString();
+            int relatedPort = _mdns != null || turn.MappedEndPoint == null ? 0 : turn.MappedEndPoint.Port;
+            var passive = new IceCandidate
+            {
+                Foundation = foundation,
+                Component = IceCandidate.RtpComponent,
+                Transport = "tcp",
+                Priority = IceCandidate.ComputePriority(IceCandidateType.Relayed, IceCandidate.TcpLocalPreference(IceCandidate.TcpPassive, 8191 - index), IceCandidate.RtpComponent, "tcp"),
+                Address = relayed.Address.ToString(),
+                Port = relayed.Port,
+                Type = IceCandidateType.Relayed,
+                RelatedAddress = relatedAddress,
+                RelatedPort = relatedPort,
+            };
+            passive.TcpType = IceCandidate.TcpPassive;
+            var active = new IceCandidate
+            {
+                Foundation = foundation,
+                Component = IceCandidate.RtpComponent,
+                Transport = "tcp",
+                Priority = IceCandidate.ComputePriority(IceCandidateType.Relayed, IceCandidate.TcpLocalPreference(IceCandidate.TcpActive, 8191 - index), IceCandidate.RtpComponent, "tcp"),
+                Address = relayed.Address.ToString(),
+                Port = ActivePort,
+                Type = IceCandidateType.Relayed,
+                RelatedAddress = relatedAddress,
+                RelatedPort = relatedPort,
+            };
+            active.TcpType = IceCandidate.TcpActive;
+
+            var passiveBase = new LocalBase { TcpRelay = turn, EndPoint = relayed, Candidate = passive };
+            turn.ConnectionAttempt += (s, e) => _ = AcceptRelayedAsync(passiveBase, e);
+            List<IPAddress> known;
+            lock (_sync)
+            {
+                _tcpRelays.Add(turn);
+                known = _remoteCandidates.Select(c => c.EndPoint?.Address).Where(a => a != null).Distinct().ToList();
+            }
+            AddBase(passiveBase, gathered);
+            AddBase(new LocalBase { TcpRelay = turn, EndPoint = new IPEndPoint(relayed.Address, ActivePort), Candidate = active }, gathered);
+            // the peer's candidates told of before: their permissions now
+            foreach (var address in known)
+                PermitOnTcpRelays(address);
+        }
+
+        // a permission of the address on each relay of TCP of its family: of a peer's connection to it, of no other source,
+        // let through (RFC 6062 5.3)
+        private void PermitOnTcpRelays(IPAddress address)
+        {
+            List<TurnClient> relays;
+            lock (_sync)
+                relays = _tcpRelays.Where(r => r.RelayedEndPoint?.AddressFamily == address.AddressFamily).ToList();
+            foreach (var relay in relays)
+                _ = PermitAsync(relay, address);
+        }
+
+        private async Task PermitAsync(TurnClient relay, IPAddress address)
+        {
+            try
+            {
+                await relay.CreatePermissionAsync(address).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is TurnException || ex is StunException || ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is InvalidOperationException)
+            {
+                Trace($"No permission of {address} on {relay.RelayedEndPoint}: {ex.Message}");
+            }
+        }
+
+        // a peer's connection to the relayed address of a passive candidate of TCP: its data connection of the agent's, of a
+        // ConnectionBind, as a connection to a passive candidate of the agent's own is
+        private async Task AcceptRelayedAsync(LocalBase local, TurnConnectionAttemptEventArgs attempt)
+        {
+            lock (_sync)
+            {
+                if (_closed)
+                    return;
+                if (_connections.Count + _pendingConnections >= _options.MaxTcpConnections)
+                {
+                    // left: the server closes it of no ConnectionBind in 30 seconds
+                    Trace($"Connection from {attempt.Peer} to {local.EndPoint} refused: {_options.MaxTcpConnections} already");
+                    return;
+                }
+                _pendingConnections++;
+            }
+            IceTcpConnection connection = null;
+            try
+            {
+                var relayed = await local.TcpRelay.AcceptPeerAsync(attempt).ConfigureAwait(false);
+                connection = new IceTcpConnection(relayed.Stream, local.EndPoint, attempt.Peer, relayed);
+            }
+            catch (Exception ex) when (ex is TurnException || ex is StunException || ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is InvalidOperationException)
+            {
+                Trace($"Connection from {attempt.Peer} to {local.EndPoint} not taken: {ex.Message}");
+            }
+            lock (_sync)
+            {
+                _pendingConnections--;
+                if (connection != null && !_closed)
+                {
+                    _connections.Add(connection);
+                }
+                else
+                {
+                    connection?.Dispose();
+                    connection = null;
+                }
+            }
+            if (connection != null)
+                Accepted(local, connection);
+        }
+
+        // a pair of the agent's active relayed candidate of TCP: its connection to the peer's passive one of Connect
+        private async Task<IceTcpConnection> ConnectRelayedAsync(IceCandidatePair pair)
+        {
+            var relay = pair.Base.TcpRelay;
+            using (var timeout = new CancellationTokenSource(TcpConnectTimeout))
+            {
+                var relayed = await relay.ConnectPeerAsync(pair.RemoteEndPoint, timeout.Token).ConfigureAwait(false);
+                // of the address the peer sees: the relayed one
+                return new IceTcpConnection(relayed.Stream, relay.RelayedEndPoint ?? pair.Base.EndPoint, pair.RemoteEndPoint, relayed);
+            }
+        }
 
         // of ICE-TCP over TLS, as of TCP: the candidates of transport "tls", their connections of TLS
         private void GatherTls(List<IPAddress> addresses, List<IceCandidate> gathered)
@@ -189,13 +327,13 @@ namespace SharpICE
                             client.Dispose();
                             return;
                         }
-                        if (_connections.Count + _tlsHandshakes >= _options.MaxTcpConnections)
+                        if (_connections.Count + _pendingConnections >= _options.MaxTcpConnections)
                         {
                             Trace($"Connection from {client.Client.RemoteEndPoint} refused: {_options.MaxTcpConnections} already");
                             client.Dispose();
                             continue;
                         }
-                        _tlsHandshakes++;
+                        _pendingConnections++;
                     }
                     _ = AcceptTlsAsync(local, client);
                     continue;
@@ -209,7 +347,7 @@ namespace SharpICE
                         connection.Dispose();
                         return;
                     }
-                    if (_connections.Count + _tlsHandshakes >= _options.MaxTcpConnections)
+                    if (_connections.Count + _pendingConnections >= _options.MaxTcpConnections)
                     {
                         Trace($"Connection from {connection.RemoteEndPoint} refused: {_options.MaxTcpConnections} already");
                         connection.Dispose();
@@ -248,7 +386,7 @@ namespace SharpICE
 
             lock (_sync)
             {
-                _tlsHandshakes--;
+                _pendingConnections--;
                 if (connection != null && !_closed)
                 {
                     _connections.Add(connection);
@@ -294,8 +432,52 @@ namespace SharpICE
             }
         }
 
-        // the connection of a pair of the agent's active candidate, and the check begun of it sent over it
+        // the connection of a pair of the agent's active candidate - of its own, or of a relay of TCP - and the check begun of
+        // it sent over it
         private async Task ConnectAsync(IceCandidatePair pair)
+        {
+            IceTcpConnection connection;
+            try
+            {
+                connection = pair.Base.TcpRelay != null
+                    ? await ConnectRelayedAsync(pair).ConfigureAwait(false)
+                    : await ConnectDirectAsync(pair).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException || ex is IOException || ex is OperationCanceledException
+                || ex is InvalidOperationException || ex is DtlsException || ex is TurnException || ex is StunException)
+            {
+                lock (_sync)
+                {
+                    if (pair.State == IceCandidatePairState.InProgress)
+                    {
+                        _transactions.Remove(Key(pair.TransactionId));
+                        pair.State = pair.LastSucceeded > DateTime.MinValue ? IceCandidatePairState.Succeeded : IceCandidatePairState.Failed;
+                    }
+                }
+                Trace($"Could not connect {pair}: {ex.Message}");
+                return;
+            }
+
+            byte[] request;
+            lock (_sync)
+            {
+                if (_closed || pair.Connection != null)
+                {
+                    connection.Dispose();
+                    return;
+                }
+                pair.Connection = connection;
+                _connections.Add(connection);
+                request = pair.State == IceCandidatePairState.InProgress ? pair.Request : null;
+            }
+            Trace($"Connected {pair}");
+            StartReceiving(pair.Base, connection);
+            if (request != null)
+                connection.Send(request, 0, request.Length);
+        }
+
+        // a connection of the agent's own, of TCP, or of TLS over it
+        private async Task<IceTcpConnection> ConnectDirectAsync(IceCandidatePair pair)
         {
             var client = new TcpClient(pair.RemoteEndPoint.AddressFamily);
             TlsStream tls = null;
@@ -319,38 +501,12 @@ namespace SharpICE
                     }
                 }
             }
-            catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException || ex is IOException || ex is OperationCanceledException || ex is InvalidOperationException || ex is DtlsException)
+            catch
             {
                 client.Dispose();
-                lock (_sync)
-                {
-                    if (pair.State == IceCandidatePairState.InProgress)
-                    {
-                        _transactions.Remove(Key(pair.TransactionId));
-                        pair.State = pair.LastSucceeded > DateTime.MinValue ? IceCandidatePairState.Succeeded : IceCandidatePairState.Failed;
-                    }
-                }
-                Trace($"Could not connect {pair}: {ex.Message}");
-                return;
+                throw;
             }
-
-            var connection = new IceTcpConnection(client, tls);
-            byte[] request;
-            lock (_sync)
-            {
-                if (_closed || pair.Connection != null)
-                {
-                    connection.Dispose();
-                    return;
-                }
-                pair.Connection = connection;
-                _connections.Add(connection);
-                request = pair.State == IceCandidatePairState.InProgress ? pair.Request : null;
-            }
-            Trace($"Connected {pair}");
-            StartReceiving(pair.Base, connection);
-            if (request != null)
-                connection.Send(request, 0, request.Length);
+            return new IceTcpConnection(client, tls);
         }
 
         private void StartReceiving(LocalBase local, IceTcpConnection connection)
@@ -395,7 +551,20 @@ namespace SharpICE
     {
         private readonly TcpClient _client;
         private readonly Stream _stream;
+        private readonly IDisposable _owner;
         private readonly object _writing = new object();
+
+        /// <summary>
+        /// A connection of a stream of what else - of a relay of TCP, its data connection to the server - of the addresses the
+        /// peer and the agent are of to each other, closed with what owns it.
+        /// </summary>
+        public IceTcpConnection(Stream stream, IPEndPoint localEndPoint, IPEndPoint remoteEndPoint, IDisposable owner)
+        {
+            _stream = stream;
+            _owner = owner;
+            LocalEndPoint = IceAgent.Normalize(localEndPoint);
+            RemoteEndPoint = IceAgent.Normalize(remoteEndPoint);
+        }
 
         /// <summary>The connection, of its own stream, or of the TLS of it given.</summary>
         public IceTcpConnection(TcpClient client, Stream tls = null)
@@ -494,7 +663,8 @@ namespace SharpICE
         public void Dispose()
         {
             _stream.Dispose();
-            _client.Dispose();
+            _client?.Dispose();
+            _owner?.Dispose();
         }
     }
 }

@@ -114,6 +114,9 @@ namespace SharpICE
             public UdpSender Sender;
             public TcpListener Listener;
             public TurnClient Turn;
+            // of a relayed candidate of TCP (RFC 6544, RFC 6062): the client of its TCP allocation, of connections, not of the
+            // datagrams of Turn
+            public TurnClient TcpRelay;
 
             // of its one receiving loop - the socket's, or the relay's client's - told of again of each datagram
             public readonly IceDataReceivedEventArgs Args = new IceDataReceivedEventArgs();
@@ -622,7 +625,16 @@ namespace SharpICE
         {
             if (_options.TurnServers.Count == 0)
                 return;
+            // of ICE-TCP, a TCP allocation too of each server of TCP or TLS (RFC 6062): its relayed candidates of TCP
+            var tcpServers = _options.IncludeTcp ? _options.TurnServers.Where(IsOfStream).ToList() : new List<IceTurnServer>();
+            var tcpAllocating = Task.WhenAll(tcpServers.Select(server => AllocateAsync(server, cancellationToken, true)));
             var allocations = await Task.WhenAll(_options.TurnServers.Select(server => AllocateAsync(server, cancellationToken))).ConfigureAwait(false);
+            var tcpAllocations = await tcpAllocating.ConfigureAwait(false);
+            for (int i = 0; i < tcpAllocations.Length; i++)
+            {
+                if (tcpAllocations[i] != null)
+                    GatherTcpRelayed(tcpAllocations[i], i, gathered);
+            }
             int index = 0;
             foreach (var turn in allocations)
             {
@@ -660,7 +672,21 @@ namespace SharpICE
             }
         }
 
-        private async Task<TurnClient> AllocateAsync(IceTurnServer server, CancellationToken cancellationToken)
+        // a server of TCP, or of TLS: "turn:...?transport=tcp", or "turns:..." of no "?transport=udp"
+        private static bool IsOfStream(IceTurnServer server)
+        {
+            try
+            {
+                return StunUri.Parse(server.Uri).TransportProtocol == "tcp";
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+        }
+
+        // of TCP, a TCP allocation (RFC 6062) of a server of TCP or TLS, of the relayed candidates of ICE-TCP
+        private async Task<TurnClient> AllocateAsync(IceTurnServer server, CancellationToken cancellationToken, bool tcp = false)
         {
             TurnClient turn = null;
             using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
@@ -679,8 +705,8 @@ namespace SharpICE
                     turn = new TurnClient(options);
                     await turn.ConnectAsync(server.Uri, timeout.Token).ConfigureAwait(false);
                     // of IPv6, a relayed address of each family, of a server that allocates them (RFC 8656 7.1); one of RFC 5766
-                    // takes the attribute for one it does not know, and allocates one of IPv4
-                    await turn.AllocateAsync(new TurnAllocateOptions { Dual = _options.IncludeIPv6 }, timeout.Token).ConfigureAwait(false);
+                    // takes the attribute for one it does not know, and allocates one of IPv4; of TCP, of one family alone
+                    await turn.AllocateAsync(tcp ? new TurnAllocateOptions { Tcp = true } : new TurnAllocateOptions { Dual = _options.IncludeIPv6 }, timeout.Token).ConfigureAwait(false);
                     lock (_sync)
                     {
                         if (_closed)
@@ -690,7 +716,7 @@ namespace SharpICE
                         }
                         _turns.Add(turn);
                     }
-                    Trace($"Allocated {string.Join(", ", turn.RelayedEndPoints)} of {server.Uri}");
+                    Trace($"Allocated {(tcp ? "TCP " : "")}{string.Join(", ", turn.RelayedEndPoints)} of {server.Uri}");
                     return turn;
                 }
                 catch (Exception ex) when (ex is TurnException || ex is StunException || ex is OperationCanceledException || ex is System.IO.IOException || ex is SocketException || ex is FormatException)
@@ -939,6 +965,8 @@ namespace SharpICE
                     AddPair(local, candidate);
             }
             Trace($"Remote {candidate}");
+            // of the relays of TCP, a permission of its address: the peer's connections to them come of it
+            PermitOnTcpRelays(endPoint.Address);
             return true;
         }
 
@@ -956,6 +984,12 @@ namespace SharpICE
             // of TCP and TLS, an active candidate of the peer's passive ones; a passive one's pairs are of the connections the
             // peer makes to it, as its checks come over them (RFC 6544 6.2)
             if (local.IsStream && (local.Candidate.TcpType != IceCandidate.TcpActive || remote.TcpType != IceCandidate.TcpPassive))
+                return null;
+            // of a relay of TCP and the peer's of one server's address: its Connect and the peer's to each other are of one
+            // 4-tuple of the server's, which two would make at once, and fail of each other - of the lower relayed port alone,
+            // alike of both agents, whichever their roles
+            if (local.TcpRelay != null && remote.Type == IceCandidateType.Relayed && local.TcpRelay.RelayedEndPoint is IPEndPoint relayed
+                && relayed.Address.Equals(endPoint.Address) && relayed.Port >= endPoint.Port)
                 return null;
 
             var existing = _pairs.FirstOrDefault(p => p.Base == local && p.RemoteEndPoint.Equals(endPoint));
