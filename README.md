@@ -1,242 +1,219 @@
 # SharpICE
-STUN, TURN and ICE in C#, with no native dependencies. The libraries target netstandard2.0, .NET Framework 4.7.2, .NET 8 and .NET 10.
+STUN, TURN and ICE client and server written in C#, with no native dependencies.
+
+[![NuGet version](https://img.shields.io/nuget/v/SharpICE.svg?style=flat-square&label=SharpICE)](https://www.nuget.org/packages/SharpICE)
+[![NuGet version](https://img.shields.io/nuget/v/SharpSTUN.svg?style=flat-square&label=SharpSTUN)](https://www.nuget.org/packages/SharpSTUN)
+[![NuGet version](https://img.shields.io/nuget/v/SharpTURN.svg?style=flat-square&label=SharpTURN)](https://www.nuget.org/packages/SharpTURN)
 
 There are three libraries:
+1. SharpSTUN - STUN client and server
+1. SharpTURN - TURN client and server, built on SharpSTUN
+1. SharpICE - ICE agent, built on SharpSTUN and SharpTURN
 
-| Library | What it is |
-|---|---|
-| SharpSTUN | A STUN client and server |
-| SharpTURN | A TURN client and server, built on SharpSTUN |
-| SharpICE | An ICE agent, built on SharpSTUN and SharpTURN |
+Implements the following RFCs:
+1. DNS SRV records [RFC2782](https://www.rfc-editor.org/rfc/rfc2782)
+1. Framing RTP and RTCP Packets over Connection-Oriented Transport [RFC4571](https://www.rfc-editor.org/rfc/rfc4571)
+1. Test Vectors for Session Traversal Utilities for NAT (STUN) [RFC5769](https://www.rfc-editor.org/rfc/rfc5769)
+1. Traversal Using Relays around NAT (TURN) Extensions for TCP Allocations [RFC6062](https://www.rfc-editor.org/rfc/rfc6062)
+1. TCP Candidates with Interactive Connectivity Establishment (ICE) [RFC6544](https://www.rfc-editor.org/rfc/rfc6544)
+1. Multicast DNS [RFC6762](https://www.rfc-editor.org/rfc/rfc6762)
+1. URI Scheme for the Session Traversal Utilities for NAT (STUN) Protocol [RFC7064](https://www.rfc-editor.org/rfc/rfc7064)
+1. Traversal Using Relays around NAT (TURN) Uniform Resource Identifiers [RFC7065](https://www.rfc-editor.org/rfc/rfc7065)
+1. Session Traversal Utilities for NAT (STUN) Usage for Consent Freshness [RFC7675](https://www.rfc-editor.org/rfc/rfc7675)
+1. Multiplexing Scheme Updates for Secure Real-time Transport Protocol (SRTP) Extension for Datagram Transport Layer Security (DTLS) [RFC7983](https://www.rfc-editor.org/rfc/rfc7983)
+1. Interactive Connectivity Establishment (ICE): A Protocol for Network Address Translator (NAT) Traversal [RFC8445](https://www.rfc-editor.org/rfc/rfc8445)
+1. Session Traversal Utilities for NAT (STUN) [RFC8489](https://www.rfc-editor.org/rfc/rfc8489)
+1. Traversal Using Relays around NAT (TURN): Relay Extensions to Session Traversal Utilities for NAT (STUN) [RFC8656](https://www.rfc-editor.org/rfc/rfc8656)
+1. Trickle ICE: Incremental Provisioning of Candidates for the Interactive Connectivity Establishment (ICE) Protocol [RFC8838](https://www.rfc-editor.org/rfc/rfc8838)
+1. Session Description Protocol (SDP) Offer/Answer Procedures for Interactive Connectivity Establishment (ICE) [RFC8839](https://www.rfc-editor.org/rfc/rfc8839)
 
-DTLS and TLS come from [SharpDTLS](https://github.com/jimm98y/SharpDTLS) by default. You can switch to BouncyCastle, or for TLS to .NET's `SslStream`.
+## DTLS and TLS
+STUN and TURN can run over UDP, TCP, TLS and DTLS. DTLS and TLS are based upon [SharpDTLS](https://github.com/jimm98y/SharpDTLS) by default, which supports DTLS 1.2, DTLS 1.3, TLS 1.2 and TLS 1.3. To use another implementation, set `DtlsStack` or `TlsStack` in the client or server options:
+1. `DtlsStacks.SharpDtls` (default) - DTLS 1.3 and DTLS 1.2
+1. `DtlsStacks.BouncyCastle` - DTLS 1.2 only
+1. `TlsStacks.SharpDtls` (default) - TLS 1.3 and TLS 1.2
+1. `TlsStacks.BouncyCastle` - TLS 1.2 only
+1. `TlsStacks.System` - .NET's `SslStream`
 
-## SharpSTUN
+With SharpDTLS and BouncyCastle, the server certificate must have an exportable private key.
+
+## STUN
 ### Client
-A STUN client ([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489)).
-
-- **Credentials**:
-  - Long-term credentials: PASSWORD-ALGORITHMS, USERHASH, stale nonces, and integrity checks on every response.
-  - Short-term credentials, as ICE uses them.
-- **Transports**:
-  - UDP (with retransmissions), TCP, TLS and DTLS.
-  - Over TLS and DTLS, the server's certificate is checked against its host name.
-- **DTLS stack** (`DtlsStack`): SharpDTLS (the default) for DTLS 1.3 and 1.2, or BouncyCastle for DTLS 1.2.
-- **TLS stack** (`TlsStack`): SharpDTLS (the default) for TLS 1.3 and 1.2, BouncyCastle for TLS 1.2, or .NET's `SslStream`.
-- **Redirects**: ALTERNATE-SERVER and ALTERNATE-DOMAIN are followed. The client never goes to the same server twice.
-- **Unknown attributes**: if a response has an unknown comprehension-required attribute, the transaction fails.
-- **URIs and DNS**:
-  - STUN and TURN URIs ([RFC 7064](https://www.rfc-editor.org/rfc/rfc7064), [RFC 7065](https://www.rfc-editor.org/rfc/rfc7065)).
-  - A host without a port is looked up with DNS SRV ([RFC 2782](https://www.rfc-editor.org/rfc/rfc2782)), and each server it returns is tried in turn.
-- **Tested** against the test vectors of [RFC 5769](https://www.rfc-editor.org/rfc/rfc5769), and the SHA-256 vectors of RFC 8489 (as corrected by erratum 6268).
-
+Create the STUN client. Username and password are only needed for a server with long-term credentials:
 ```cs
-// Connect to a server by URI. Uses SRV records, and UDP, TCP or TLS.
 using var client = new StunClient(new StunClientOptions { Username = "user", Password = "pass" });
-await client.ConnectAsync("stuns:stun.example.org");
+```
+Connect to the server using a STUN URI. A host without a port is looked up using DNS SRV records and each server is tried in turn:
+```cs
+await client.ConnectAsync("stun:stun.example.org");
+```
+Get the address the server sees you at:
+```cs
 IPEndPoint mapped = await client.GetMappedAddressAsync();
-
-// Send any request. If the server asks for credentials, the client sends it again with them.
+```
+Send any other request. When the server asks for credentials, the client sends the request again with them:
+```cs
 StunMessage response = await client.RequestAsync(new StunMessage(StunMethod.Binding, StunMessageClass.Request));
-
-// Use DTLS instead of TLS: SharpDTLS by default, or BouncyCastle.
-using var dtls = new StunClient(new StunClientOptions { UseDtls = true });
-await dtls.ConnectAsync("stuns:stun.example.org");
-using var bc = new StunClient(new StunClientOptions { UseDtls = true, DtlsStack = DtlsStacks.BouncyCastle });
-
-// Just a Binding request, without a client object.
-var server = await StunClient.ResolveAsync("stun.l.google.com:19302");
+```
+To use TLS, use the "stuns" URI. The server's certificate is checked against the host name:
+```cs
+await client.ConnectAsync("stuns:stun.example.org");
+```
+To use DTLS instead of TLS, set `UseDtls`:
+```cs
+using var client = new StunClient(new StunClientOptions { UseDtls = true });
+await client.ConnectAsync("stuns:stun.example.org");
+```
+For a single Binding request, you don't need a client at all:
+```cs
+IPEndPoint server = await StunClient.ResolveAsync("stun.l.google.com:19302");
 IPEndPoint address = await StunClient.GetMappedAddressAsync(server, TimeSpan.FromSeconds(3));
 ```
-
 ### Server
-A STUN server for the Binding method ([RFC 8489](https://www.rfc-editor.org/rfc/rfc8489)).
-
-- **Listeners**: UDP, TCP, TLS and DTLS, each on its own listener.
-- **DTLS**:
-  - A cookie exchange runs before any connection is set up ([RFC 6347](https://www.rfc-editor.org/rfc/rfc6347), [RFC 9147](https://www.rfc-editor.org/rfc/rfc9147)).
-  - The stack is set by `DtlsStack`: SharpDTLS (the default) for DTLS 1.3 and 1.2, or BouncyCastle for DTLS 1.2.
-- **TLS**:
-  - The stack is set by `TlsStack`: SharpDTLS by default.
-  - With SharpDTLS or BouncyCastle, the certificate's private key must be exportable. With `SslStream` it doesn't have to be.
-- **Long-term credentials**, when you set a realm:
-  - Requests are checked in the order RFC 8489 section 9.2.4 gives.
-  - MD5 and SHA-256, and USERHASH.
-  - Nonces are stateless and tied to the client's address. A stale one gets a 438.
-- **Redirects**: ALTERNATE-SERVER and ALTERNATE-DOMAIN, chosen by the request's source.
-- **Unknown attributes**: a request with an unknown comprehension-required attribute gets a 420. You can set which attributes are known.
-- **Dropped**: indications, responses and unsupported methods.
-- **Your own transport**: `Process` handles a message from a transport you manage.
-
-Classic STUN (RFC 3489, without the magic cookie) gets no answer.
-
+Create the STUN server. Set `Realm` and `Users` to require long-term credentials. `Certificate` is only needed for TLS and DTLS:
 ```cs
 var server = new StunServer(new StunServerOptions
 {
     Realm = "example.org",
     Users = new Dictionary<string, string> { ["user"] = "pass" },
-    Certificate = certificate, // needed for TLS and DTLS; for DTLS the private key must be exportable
+    Certificate = certificate,
 });
+```
+Start the listeners:
+```cs
 server.ListenUdp(new IPEndPoint(IPAddress.Any, 3478));
 server.ListenTcp(new IPEndPoint(IPAddress.Any, 3478));
 server.ListenTls(new IPEndPoint(IPAddress.Any, 5349));
 server.ListenDtls(new IPEndPoint(IPAddress.Any, 5349));
 ```
+The server answers Binding requests. It supports MD5 and SHA-256 credentials, USERHASH, stateless nonces and ALTERNATE-SERVER redirects. DTLS clients must pass a cookie exchange first, so a spoofed address can't create a connection. Classic STUN (RFC 3489) is not answered.
 
-## SharpTURN
+## TURN
 ### Client
-A TURN client ([RFC 8656](https://www.rfc-editor.org/rfc/rfc8656)). It supports two kinds of allocation:
-- UDP allocations, over UDP, TCP, TLS or DTLS.
-- TCP allocations ([RFC 6062](https://www.rfc-editor.org/rfc/rfc6062)), over TCP or TLS.
-
-Its features:
-- **Allocate options**:
-  - REQUESTED-ADDRESS-FAMILY, and dual-stack allocations with ADDITIONAL-ADDRESS-FAMILY.
-  - EVEN-PORT with RESERVATION-TOKEN, DONT-FRAGMENT and LIFETIME.
-  - SHA-256 when the server offers it.
-- **Refreshes**:
-  - The allocation is refreshed a minute before it expires, permissions every 4 minutes, and channels every 9 minutes.
-  - A Refresh with a lifetime of 0 deletes the allocation.
-- **Sending data**:
-  - A permission for the peer's address is installed first.
-  - Data goes out in Send indications, or as ChannelData once a channel is bound.
-  - ChannelData is padded over TCP and TLS.
-- **Receiving data**: Data indications and ChannelData are accepted only from peers that have a permission.
-- **URIs**: TURN URIs ([RFC 7065](https://www.rfc-editor.org/rfc/rfc7065)) and their SRV records.
-- **TCP allocations**:
-  - Connect opens a connection to a peer.
-  - A ConnectionAttempt tells you a peer has connected to you.
-  - Each peer connection gets its own data connection, set up with ConnectionBind, and you get it as a plain `Stream` of the peer's bytes.
-
+Create the TURN client and connect to the server. The transport can be UDP, TCP, TLS or DTLS:
 ```cs
 using var turn = new TurnClient(new StunClientOptions { Username = "user", Password = "pass" });
 await turn.ConnectAsync("turn:turn.example.org?transport=udp");
-await turn.AllocateAsync();
-turn.DataReceived += (s, e) => { /* e.Peer; the data is e.Buffer, e.Offset, e.Count */ };
-await turn.SendAsync(peer, data);          // installs a permission, then sends a Send indication
-await turn.BindChannelAsync(peer);         // ChannelData from now on
 ```
-
-A TCP allocation, over TCP or TLS to the server:
-
+Allocate the relayed address. The allocation, permissions and channels are refreshed automatically:
+```cs
+await turn.AllocateAsync();
+IPEndPoint relayed = turn.RelayedEndPoint;
+```
+Receive data from the peers:
+```cs
+turn.DataReceived += (sender, e) =>
+{
+    IPEndPoint peer = e.Peer;
+    // the data is in e.Buffer, e.Offset, e.Count
+};
+```
+Send data to a peer. A permission for the peer is created first, then the data is sent in a Send indication:
+```cs
+await turn.SendAsync(peer, data);
+```
+Bind a channel to send the data to the peer as ChannelData, which has less overhead:
+```cs
+await turn.BindChannelAsync(peer);
+```
+Delete the allocation:
+```cs
+await turn.DeallocateAsync();
+```
+### TCP Allocations
+A TCP allocation relays TCP connections to the peers. Connect to the server over TCP or TLS and allocate:
 ```cs
 using var turn = new TurnClient(new StunClientOptions { Username = "user", Password = "pass" });
 await turn.ConnectAsync("turn:turn.example.org?transport=tcp");
 await turn.AllocateAsync(new TurnAllocateOptions { Tcp = true });
-
-using var connection = await turn.ConnectPeerAsync(peer);   // the server connects to the peer
-await connection.Stream.WriteAsync(data, 0, data.Length);
-
-await turn.CreatePermissionAsync(peer.Address);              // peers with a permission may connect to you
-turn.ConnectionAttempt += async (s, e) => { using var incoming = await turn.AcceptPeerAsync(e); /* incoming.Stream */ };
 ```
-
+Connect to a peer. The connection is a plain `Stream` of the peer's bytes:
+```cs
+using var connection = await turn.ConnectPeerAsync(peer);
+await connection.Stream.WriteAsync(data, 0, data.Length);
+```
+Accept the peers that connect to the relayed address. Only peers with a permission can connect:
+```cs
+await turn.CreatePermissionAsync(peer.Address);
+turn.ConnectionAttempt += async (sender, e) =>
+{
+    using var incoming = await turn.AcceptPeerAsync(e);
+    // incoming.Stream
+};
+```
 ### Server
-A TURN server for UDP allocations ([RFC 8656](https://www.rfc-editor.org/rfc/rfc8656)) over any of the STUN server's transports, and for TCP allocations ([RFC 6062](https://www.rfc-editor.org/rfc/rfc6062)) over TCP and TLS.
-
-- **Requests**:
-  - Allocate, Refresh, CreatePermission and ChannelBind, all with long-term credentials.
-  - Only the user who made an allocation can use it (otherwise 441).
-- **UDP relays**:
-  - Each allocation gets its own relay port, chosen at random from the dynamic range.
-  - Dual-stack allocations are supported. When one address family fails, ADDRESS-ERROR-CODE says so.
-  - EVEN-PORT reserves the next port for 30 seconds.
-- **Lifetimes**:
-  - Permissions last 5 minutes and channels 10 minutes.
-  - Allocations have a default and a maximum lifetime.
-  - An allocation made over TCP or TLS ends when its connection closes.
-- **Relaying**:
-  - Data from peers goes to the client in Data indications, or as ChannelData on a bound channel.
-  - Send indications and ChannelData from the client go to its peers.
-- **Errors**:
-  - The error responses of RFC 8656 section 19: 403, 437, 440, 441, 442, 443, 486 and 508.
-  - A retransmitted Allocate gets the same answer again.
-- **Safe defaults**:
-  - A realm is required. It isn't an open relay unless you ask for one.
-  - Peers must have public unicast addresses. Loopback, private, link-local and multicast addresses are refused unless you allow them with `AllowPeer`. The server's own host is always refused, except its relay ports.
-  - Allocations are limited per user and in total, and so are permissions.
-- **TCP allocations**:
-  - Each allocation gets a TCP relay. Connections to peers are made from its address and port.
-  - Connect returns a CONNECTION-ID once the connection is up, or 446 or 447.
-  - A peer with a permission that connects is announced with a ConnectionAttempt. A peer without one is closed.
-  - ConnectionBind on a new connection, by the allocation's user (otherwise 441), joins it to the peer. From then on the bytes are relayed unchanged, including what the peer sent before.
-  - A peer connection without a ConnectionBind within 30 seconds is closed.
-  - When either connection closes, so does the other, and all of them close with the allocation.
-  - At most `MaxConnectionsPerAllocation` connections at once (otherwise 508).
-
-ICMP errors are not relayed, because the system does not say which peer they came from. A TCP relay port is bound with address reuse, because the connections to peers are made from it. On Windows this means another process on the same host could bind that port too.
-
+Create the TURN server. `RelayAddress` is the public address of the relays:
 ```cs
 var server = new TurnServer(new TurnServerOptions
 {
-    Stun = new StunServerOptions { Realm = "example.org", Users = new Dictionary<string, string> { ["user"] = "pass" }, AuthenticateBinding = false },
+    Stun = new StunServerOptions
+    {
+        Realm = "example.org",
+        Users = new Dictionary<string, string> { ["user"] = "pass" },
+        AuthenticateBinding = false,
+    },
     RelayAddress = IPAddress.Parse("203.0.113.7"),
 });
+```
+Start the listeners:
+```cs
 server.ListenUdp(new IPEndPoint(IPAddress.Any, 3478));
 server.ListenTcp(new IPEndPoint(IPAddress.Any, 3478));
 ```
+The server supports UDP and TCP allocations, dual-stack allocations, EVEN-PORT, permissions and channels. Its defaults are safe: credentials are required, the relays only reach public unicast addresses (use `AllowPeer` to allow others), the server's own host is never reachable through a relay, and allocations and connections are limited per user and per address.
 
-## SharpICE
-An ICE agent ([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445)) with one component, as WebRTC uses it: RTP and RTCP are multiplexed and all media is bundled.
-
-- **Candidates**:
-  - Host candidates from the local addresses, with a socket for each.
-  - Server reflexive candidates from STUN servers (found with DNS SRV too).
-  - Relayed candidates from TURN servers. You can use relayed candidates only, if you want. When a relayed pair is selected, a channel is bound to the peer.
-- **ICE over TCP** ([RFC 6544](https://www.rfc-editor.org/rfc/rfc6544)), if you turn it on (`IncludeTcp`):
-  - Passive and active candidates, framed as [RFC 4571](https://www.rfc-editor.org/rfc/rfc4571) describes. UDP is preferred.
-  - Simultaneous-open is not supported.
-- **Relayed ICE-TCP candidates**, when ICE over TCP is on:
-  - Each TURN server reached over TCP or TLS gets a TCP allocation ([RFC 6062](https://www.rfc-editor.org/rfc/rfc6062)).
-  - The passive candidate is the relayed address, and each of the peer's candidate addresses gets a permission. The active candidate uses Connect.
-  - When both sides use relays on the same server, the one with the lower port connects.
-- **1:1 NAT**, such as a cloud host's public address (`PublicAddresses`): a full agent uses it for server reflexive candidates, a lite agent for host candidates.
-- **SDP**: candidates in the format SDP uses ([RFC 8839](https://www.rfc-editor.org/rfc/rfc8839)). Peer reflexive candidates are learnt from the peer's checks.
-- **mDNS**:
-  - Browsers hide their addresses behind ".local" names. These are resolved with multicast DNS ([RFC 6762](https://www.rfc-editor.org/rfc/rfc6762)).
-  - If a peer reflexive candidate was learnt first, it takes the type the peer signals later.
-  - You can hide your own addresses the same way (`MdnsCandidates`): host candidates get random names that the agent answers mDNS queries for, and server reflexive candidates don't show the related address.
-- **Trickle ICE** and end-of-candidates ([RFC 8838](https://www.rfc-editor.org/rfc/rfc8838)): once every pair has failed and the peer has sent all its candidates, the agent fails straight away.
-- **Checks**:
-  - Paced and retransmitted, with triggered checks.
-  - Frozen foundations are unfrozen as their pairs succeed.
-  - Role conflicts are resolved with the tie-breakers.
-- **Nomination**: regular nomination when controlling. When controlled, the agent selects the pair the peer nominates.
-- **ICE lite**: a lite peer is always controlled. The agent can also be lite itself (`Lite`): it then has host candidates only and sends no checks.
-- **ICE restart**: new credentials. Data keeps using the selected pair until a new one is chosen. The agent also follows the peer's restarts.
-- **Consent freshness** ([RFC 7675](https://www.rfc-editor.org/rfc/rfc7675)) on the selected pair, at a random interval of 4 to 6 seconds.
-- **Unknown attributes**: a request with an unknown comprehension-required attribute gets a 420.
-- **Other traffic**: every datagram that is not STUN (DTLS, RTP or RTCP, see [RFC 7983](https://www.rfc-editor.org/rfc/rfc7983)) is passed up to your code.
-
+## ICE
+The ICE agent has one component, as WebRTC uses it: RTP and RTCP are multiplexed and all media is bundled.
+### Agent
+Create the agent with the STUN and TURN servers to gather the candidates from. The offerer is usually controlling, the answerer controlled:
 ```cs
 var options = new IceAgentOptions { Role = IceRole.Controlled };
 options.StunServers.Add("stun:stun.l.google.com:19302");
 options.TurnServers.Add(new IceTurnServer { Uri = "turn:turn.example.org", Username = "user", Password = "pass" });
 var agent = new IceAgent(options);
-agent.DataReceived += (s, e) => { /* DTLS, RTP or RTCP in e.Buffer, e.Offset, e.Count */ };
-var candidates = await agent.GatherCandidatesAsync(); // put them in the session description, or trickle them
+```
+Gather the local candidates and send them to the peer, together with `LocalUfrag` and `LocalPassword`, in the session description or trickled one by one:
+```cs
+var candidates = await agent.GatherCandidatesAsync();
+```
+Set the peer's credentials and candidates, then start the checks. Signal the end of the peer's candidates once it has no more:
+```cs
 agent.SetRemoteCredentials(remoteUfrag, remotePassword);
 agent.AddRemoteCandidate("candidate:1 1 udp 2130706431 192.168.1.10 50000 typ host");
 agent.Start();
-agent.AddRemoteCandidate("a=end-of-candidates");      // the peer has no more candidates
-// once agent.State is Connected:
+agent.AddRemoteCandidate("a=end-of-candidates");
+```
+Receive the data that is not STUN, such as DTLS, RTP and RTCP:
+```cs
+agent.DataReceived += (sender, e) =>
+{
+    // the data is in e.Buffer, e.Offset, e.Count
+};
+```
+Once `agent.State` is `Connected`, send data to the peer:
+```cs
 agent.Send(datagram, 0, datagram.Length);
-
-// Restart from your side: send a new offer with the new LocalUfrag, LocalPassword and candidates.
+```
+To restart ICE, call `Restart` and send a new offer with the new `LocalUfrag`, `LocalPassword` and candidates. When the peer restarts, pass its new credentials; `SetRemoteCredentials` returns true:
+```cs
 agent.Restart();
-// The peer restarted: pass the new credentials from its offer. Returns true, and you answer with your new ones.
 bool restarted = agent.SetRemoteCredentials(newRemoteUfrag, newRemotePassword);
 ```
+### Options
+1. `IncludeTcp` - gathers ICE-TCP candidates (passive and active), including relayed ones from TURN servers over TCP or TLS. UDP is preferred.
+1. `RelayOnly` - uses relayed candidates only.
+1. `Lite` - makes the agent an ICE lite agent: host candidates only and no checks of its own.
+1. `PublicAddresses` - the public addresses of a 1:1 NAT, such as on a cloud host.
+1. `MdnsCandidates` - hides the local addresses behind random ".local" names, as browsers do. The peer's ".local" candidates are always resolved using multicast DNS.
+
+The agent also supports peer reflexive candidates, triggered checks, regular nomination, role conflict resolution and consent freshness.
 
 ## Samples
 The samples run against each other on one machine with their default settings:
-
-| Sample | What it does |
-|---|---|
-| `StunServerSample [port]` | A STUN server on UDP and TCP, IPv4 and IPv6. Default port 3478. |
-| `StunClientSample [uri] [username] [password]` | Shows the address a STUN server sees you at. Default `stun:127.0.0.1:3478`. |
-| `TurnServerSample [port] [username] [password] [realm] [relayAddress]` | A TURN server with UDP and TCP relays. Default port 3479, user `user`, password `pass`. |
-| `TurnClientSample [uri] [username] [password] [peer]` | Allocates a relay and sends data through it to an echo peer and back. Default `turn:127.0.0.1:3479`. |
+1. `StunServerSample [port]` - STUN server on UDP and TCP, port 3478 by default
+1. `StunClientSample [uri] [username] [password]` - shows the address the STUN server sees you at, `stun:127.0.0.1:3478` by default
+1. `TurnServerSample [port] [username] [password] [realm] [relayAddress]` - TURN server with UDP and TCP relays, port 3479 by default, user `user` and password `pass`
+1. `TurnClientSample [uri] [username] [password] [peer]` - allocates a relay and sends data through it to an echo peer and back, `turn:127.0.0.1:3479` by default
 
 ```
 dotnet run --project src/TurnServerSample
