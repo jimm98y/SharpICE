@@ -24,9 +24,8 @@ using ReadTask = System.Threading.Tasks.ValueTask<bool>;
 #else
 using ReadTask = System.Threading.Tasks.Task<bool>;
 #endif
-using SharpStunClient;
-using SharpStunCommon;
-using SharpTurnClient;
+using SharpStun;
+using SharpTurn;
 using System;
 using System.Buffers;
 using System.Collections.Generic;

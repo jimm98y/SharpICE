@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\SharpTurnServer\SharpTurnServer.csproj" />
+    <ProjectReference Include="..\SharpTurn\SharpTurn.csproj" />
   </ItemGroup>
 
 </Project>

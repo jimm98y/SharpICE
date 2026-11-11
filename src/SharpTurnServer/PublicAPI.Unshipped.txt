@@ -1,4 +1,0 @@
-SharpTurnServer.TurnServerOptions.AllowTcpAllocations.get -> bool
-SharpTurnServer.TurnServerOptions.AllowTcpAllocations.set -> void
-SharpTurnServer.TurnServerOptions.MaxConnectionsPerAllocation.get -> int
-SharpTurnServer.TurnServerOptions.MaxConnectionsPerAllocation.set -> void

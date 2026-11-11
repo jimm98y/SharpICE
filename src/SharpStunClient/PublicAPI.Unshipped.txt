@@ -1,9 +1,0 @@
-SharpStunClient.StunClientOptions.DtlsStack.get -> SharpStunCommon.IDtlsStack
-SharpStunClient.StunClientOptions.DtlsStack.set -> void
-SharpStunClient.StunClientOptions.TlsStack.get -> SharpStunCommon.ITlsStack
-SharpStunClient.StunClientOptions.TlsStack.set -> void
-SharpStunClient.StunDtlsTransport.NegotiatedVersion.get -> ushort
-SharpStunClient.StunDtlsTransport.Stack.get -> SharpStunCommon.IDtlsStack
-SharpStunClient.StunStreamTransport.TlsStack.get -> SharpStunCommon.ITlsStack
-static SharpStunClient.StunDtlsTransport.ConnectAsync(System.Net.IPEndPoint server, string host, System.Net.Security.RemoteCertificateValidationCallback validation, SharpStunCommon.IDtlsStack stack, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStunClient.StunDtlsTransport>
-static SharpStunClient.StunStreamTransport.ConnectAsync(System.Net.IPEndPoint server, string tlsHost, System.Net.Security.RemoteCertificateValidationCallback validation, SharpStunCommon.ITlsStack tlsStack, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStunClient.StunStreamTransport>

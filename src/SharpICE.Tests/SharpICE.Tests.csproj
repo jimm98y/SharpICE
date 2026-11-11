@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFrameworks>net10.0;net472</TargetFrameworks>
@@ -13,11 +13,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\SharpStunClient\SharpStunClient.csproj" />
+    <ProjectReference Include="..\SharpStun\SharpStun.csproj" />
     <ProjectReference Include="..\SharpICE\SharpICE.csproj" />
-    <ProjectReference Include="..\SharpStunServer\SharpStunServer.csproj" />
-    <ProjectReference Include="..\SharpTurnClient\SharpTurnClient.csproj" />
-    <ProjectReference Include="..\SharpTurnServer\SharpTurnServer.csproj" />
+    <ProjectReference Include="..\SharpTurn\SharpTurn.csproj" />
   </ItemGroup>
 
   <ItemGroup>

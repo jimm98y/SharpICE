@@ -1,7 +1,10 @@
 # SharpICE
 STUN, TURN and ICE written in C#, netstandard2.0 and NET10 without any native dependencies.
 
-## SharpStunClient
+Three libraries: SharpStun - a STUN client and server - SharpTurn - a TURN client and server, of SharpStun - and SharpICE, an ICE agent of both.
+
+## SharpStun
+### Client
 A STUN client - Session Traversal Utilities for NAT [RFC8489](https://www.rfc-editor.org/rfc/rfc8489):
 1. Long-term credentials: PASSWORD-ALGORITHMS, USERHASH, stale nonces, and responses checked of their integrity
 1. Short-term credentials, as ICE's
@@ -30,8 +33,8 @@ var server = await StunClient.ResolveAsync("stun.l.google.com:19302");
 IPEndPoint address = await StunClient.GetMappedAddressAsync(server, TimeSpan.FromSeconds(3));
 ```
 
-## SharpStunServer
-A STUN server of the Binding method [RFC8489](https://www.rfc-editor.org/rfc/rfc8489), independent of SharpStunClient:
+### Server
+A STUN server of the Binding method [RFC8489](https://www.rfc-editor.org/rfc/rfc8489):
 1. Over UDP, TCP, TLS and DTLS, each listener of its own; DTLS of a cookie exchange [RFC6347](https://www.rfc-editor.org/rfc/rfc6347), [RFC9147](https://www.rfc-editor.org/rfc/rfc9147) before any association, of the stack of `DtlsStack`: SharpDTLS, the default, of DTLS 1.3 and 1.2 and a fragmented ClientHello reassembled, or BouncyCastle, of DTLS 1.2, a thread of each association and a ClientHello of one record alone; TLS of the stack of `TlsStack`, of SharpDTLS by default - its certificate's private key exportable, as of DTLS, unless of .NET's SslStream
 1. Long-term credentials, if a realm is given: the checks of RFC 8489 9.2.4 in their order, MD5 and SHA-256, USERHASH, stateless nonces of the nonce cookie and of the source, stale ones answered 438
 1. ALTERNATE-SERVER and ALTERNATE-DOMAIN, of the request's source
@@ -53,8 +56,9 @@ server.ListenTls(new IPEndPoint(IPAddress.Any, 5349));
 server.ListenDtls(new IPEndPoint(IPAddress.Any, 5349));
 ```
 
-## SharpTurnClient
-A TURN client - Traversal Using Relays around NAT [RFC8656](https://www.rfc-editor.org/rfc/rfc8656) - of UDP allocations, over any transport of SharpStunClient: UDP, TCP, TLS or DTLS; and of TCP allocations [RFC6062](https://www.rfc-editor.org/rfc/rfc6062), over TCP or TLS:
+## SharpTurn
+### Client
+A TURN client - Traversal Using Relays around NAT [RFC8656](https://www.rfc-editor.org/rfc/rfc8656) - of UDP allocations, over any transport of the STUN client: UDP, TCP, TLS or DTLS; and of TCP allocations [RFC6062](https://www.rfc-editor.org/rfc/rfc6062), over TCP or TLS:
 1. Allocate of REQUESTED-ADDRESS-FAMILY, of a dual allocation of ADDITIONAL-ADDRESS-FAMILY, of EVEN-PORT and its RESERVATION-TOKEN, of DONT-FRAGMENT and LIFETIME; SHA-256 taken of a server that lists it
 1. The allocation refreshed a minute before it expires, permissions every 4 minutes, channels every 9; deleted of a Refresh of 0
 1. Data to a peer of Send indications, or of ChannelData once a channel is bound - padded over a stream - a permission of its address installed first; of Data indications and ChannelData, of peers of a permission
@@ -84,8 +88,8 @@ await turn.CreatePermissionAsync(peer.Address);              // peers of a permi
 turn.ConnectionAttempt += async (s, e) => { using var incoming = await turn.AcceptPeerAsync(e); /* incoming.Stream */ };
 ```
 
-## SharpTurnServer
-A TURN server of UDP allocations [RFC8656](https://www.rfc-editor.org/rfc/rfc8656), over the transports of SharpStunServer, and of TCP allocations [RFC6062](https://www.rfc-editor.org/rfc/rfc6062) over TCP and TLS:
+### Server
+A TURN server of UDP allocations [RFC8656](https://www.rfc-editor.org/rfc/rfc8656), over the transports of the STUN server, and of TCP allocations [RFC6062](https://www.rfc-editor.org/rfc/rfc6062) over TCP and TLS:
 1. Allocate, Refresh, CreatePermission and ChannelBind of long-term credentials, the requests of an allocation of its own user alone (441)
 1. A relay of UDP of each allocation, of a port of the dynamic range at random; dual allocations, and their partial failure of ADDRESS-ERROR-CODE; EVEN-PORT and the next port reserved 30 seconds
 1. Permissions of 5 minutes, channels of 10, lifetimes of the default and the maximum; an allocation of TCP or TLS ended with its connection

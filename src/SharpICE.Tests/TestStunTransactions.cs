@@ -1,5 +1,4 @@
-﻿using SharpStunClient;
-using SharpStunCommon;
+﻿using SharpStun;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;

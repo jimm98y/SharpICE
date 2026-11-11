@@ -1,6 +1,5 @@
-﻿using SharpStunClient;
-using SharpStunCommon;
-using SharpTurnCommon;
+﻿using SharpStun;
+using SharpTurn;
 using System;
 using System.Linq;
 using System.Net;

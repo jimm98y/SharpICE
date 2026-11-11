@@ -1,8 +1,5 @@
-using SharpStunClient;
-using SharpStunCommon;
-using SharpStunServer;
-using SharpTurnClient;
-using SharpTurnServer;
+using SharpStun;
+using SharpTurn;
 using System;
 using System.Collections.Generic;
 using System.IO;

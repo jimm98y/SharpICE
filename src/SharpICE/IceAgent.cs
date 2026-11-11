@@ -19,9 +19,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-using SharpStunClient;
-using SharpStunCommon;
-using SharpTurnClient;
+using SharpStun;
+using SharpTurn;
 using System;
 using System.Buffers;
 using System.Collections.Generic;

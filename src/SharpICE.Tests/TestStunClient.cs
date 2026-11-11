@@ -1,5 +1,4 @@
-﻿using SharpStunClient;
-using SharpStunCommon;
+﻿using SharpStun;
 using System;
 using System.Net;
 using System.Net.Sockets;

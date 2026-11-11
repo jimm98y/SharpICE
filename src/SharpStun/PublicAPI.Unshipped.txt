@@ -1,0 +1,98 @@
+SharpStun.BcDtlsStack
+SharpStun.BcDtlsStack.BcDtlsStack() -> void
+SharpStun.BcDtlsStack.ConnectAsync(System.Net.Sockets.Socket socket, SharpStun.DtlsClientSettings settings, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStun.IDtlsAssociation>
+SharpStun.BcDtlsStack.CreateServer(SharpStun.DtlsServerSettings settings) -> SharpStun.IDtlsServer
+SharpStun.BcDtlsStack.Name.get -> string
+SharpStun.BcTlsStack
+SharpStun.BcTlsStack.BcTlsStack() -> void
+SharpStun.BcTlsStack.ConnectAsync(System.IO.Stream inner, SharpStun.TlsClientSettings settings, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.IO.Stream>
+SharpStun.BcTlsStack.CreateServer(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate) -> SharpStun.ITlsServer
+SharpStun.BcTlsStack.Name.get -> string
+SharpStun.DtlsClientSettings
+SharpStun.DtlsClientSettings.Closed.get -> System.Action<System.Exception>
+SharpStun.DtlsClientSettings.Closed.set -> void
+SharpStun.DtlsClientSettings.DtlsClientSettings() -> void
+SharpStun.DtlsClientSettings.HandshakeTimeout.get -> System.TimeSpan
+SharpStun.DtlsClientSettings.HandshakeTimeout.set -> void
+SharpStun.DtlsClientSettings.RecordReceived.get -> System.Action<byte[], int, int>
+SharpStun.DtlsClientSettings.RecordReceived.set -> void
+SharpStun.DtlsClientSettings.ServerName.get -> string
+SharpStun.DtlsClientSettings.ServerName.set -> void
+SharpStun.DtlsClientSettings.ValidateServerCertificate.get -> System.Func<System.Collections.Generic.IReadOnlyList<byte[]>, bool>
+SharpStun.DtlsClientSettings.ValidateServerCertificate.set -> void
+SharpStun.DtlsServerSettings
+SharpStun.DtlsServerSettings.Certificate.get -> System.Security.Cryptography.X509Certificates.X509Certificate2
+SharpStun.DtlsServerSettings.Certificate.set -> void
+SharpStun.DtlsServerSettings.Closed.get -> System.Action<System.Net.IPEndPoint>
+SharpStun.DtlsServerSettings.Closed.set -> void
+SharpStun.DtlsServerSettings.DtlsServerSettings() -> void
+SharpStun.DtlsServerSettings.Established.get -> System.Action<System.Net.IPEndPoint>
+SharpStun.DtlsServerSettings.Established.set -> void
+SharpStun.DtlsServerSettings.HandshakeTimeout.get -> System.TimeSpan
+SharpStun.DtlsServerSettings.HandshakeTimeout.set -> void
+SharpStun.DtlsServerSettings.RecordReceived.get -> System.Action<System.Net.IPEndPoint, byte[], int, int>
+SharpStun.DtlsServerSettings.RecordReceived.set -> void
+SharpStun.DtlsServerSettings.SendDatagram.get -> System.Action<System.Net.IPEndPoint, byte[], int, int>
+SharpStun.DtlsServerSettings.SendDatagram.set -> void
+SharpStun.DtlsStacks
+SharpStun.IDtlsAssociation
+SharpStun.IDtlsAssociation.NegotiatedVersion.get -> ushort
+SharpStun.IDtlsAssociation.Send(byte[] buffer, int offset, int count) -> void
+SharpStun.IDtlsServer
+SharpStun.IDtlsServer.Close(System.Net.IPEndPoint peer) -> void
+SharpStun.IDtlsServer.HasAssociation(System.Net.IPEndPoint peer) -> bool
+SharpStun.IDtlsServer.Peers.get -> System.Collections.Generic.IReadOnlyCollection<System.Net.IPEndPoint>
+SharpStun.IDtlsServer.Receive(System.Net.IPEndPoint from, byte[] buffer, int offset, int count) -> void
+SharpStun.IDtlsServer.Send(System.Net.IPEndPoint peer, byte[] buffer, int offset, int count) -> void
+SharpStun.IDtlsStack
+SharpStun.IDtlsStack.ConnectAsync(System.Net.Sockets.Socket socket, SharpStun.DtlsClientSettings settings, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStun.IDtlsAssociation>
+SharpStun.IDtlsStack.CreateServer(SharpStun.DtlsServerSettings settings) -> SharpStun.IDtlsServer
+SharpStun.IDtlsStack.Name.get -> string
+SharpStun.ITlsServer
+SharpStun.ITlsServer.AcceptAsync(System.IO.Stream inner, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.IO.Stream>
+SharpStun.ITlsStack
+SharpStun.ITlsStack.ConnectAsync(System.IO.Stream inner, SharpStun.TlsClientSettings settings, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.IO.Stream>
+SharpStun.ITlsStack.CreateServer(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate) -> SharpStun.ITlsServer
+SharpStun.ITlsStack.Name.get -> string
+SharpStun.SharpDtlsStack
+SharpStun.SharpDtlsStack.ConnectAsync(System.Net.Sockets.Socket socket, SharpStun.DtlsClientSettings settings, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStun.IDtlsAssociation>
+SharpStun.SharpDtlsStack.CreateServer(SharpStun.DtlsServerSettings settings) -> SharpStun.IDtlsServer
+SharpStun.SharpDtlsStack.Name.get -> string
+SharpStun.SharpDtlsStack.SharpDtlsStack() -> void
+SharpStun.SharpDtlsTlsStack
+SharpStun.SharpDtlsTlsStack.ConnectAsync(System.IO.Stream inner, SharpStun.TlsClientSettings settings, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.IO.Stream>
+SharpStun.SharpDtlsTlsStack.CreateServer(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate) -> SharpStun.ITlsServer
+SharpStun.SharpDtlsTlsStack.Name.get -> string
+SharpStun.SharpDtlsTlsStack.SharpDtlsTlsStack() -> void
+SharpStun.StunClientOptions.DtlsStack.get -> SharpStun.IDtlsStack
+SharpStun.StunClientOptions.DtlsStack.set -> void
+SharpStun.StunClientOptions.TlsStack.get -> SharpStun.ITlsStack
+SharpStun.StunClientOptions.TlsStack.set -> void
+SharpStun.StunDtlsTransport.NegotiatedVersion.get -> ushort
+SharpStun.StunDtlsTransport.Stack.get -> SharpStun.IDtlsStack
+SharpStun.StunServerOptions.DtlsStack.get -> SharpStun.IDtlsStack
+SharpStun.StunServerOptions.DtlsStack.set -> void
+SharpStun.StunServerOptions.TlsStack.get -> SharpStun.ITlsStack
+SharpStun.StunServerOptions.TlsStack.set -> void
+SharpStun.StunStreamTransport.TlsStack.get -> SharpStun.ITlsStack
+SharpStun.SystemTlsStack
+SharpStun.SystemTlsStack.ConnectAsync(System.IO.Stream inner, SharpStun.TlsClientSettings settings, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.IO.Stream>
+SharpStun.SystemTlsStack.CreateServer(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate) -> SharpStun.ITlsServer
+SharpStun.SystemTlsStack.Name.get -> string
+SharpStun.SystemTlsStack.SystemTlsStack() -> void
+SharpStun.TlsClientSettings
+SharpStun.TlsClientSettings.ServerName.get -> string
+SharpStun.TlsClientSettings.ServerName.set -> void
+SharpStun.TlsClientSettings.TlsClientSettings() -> void
+SharpStun.TlsClientSettings.ValidateServerCertificate.get -> System.Func<System.Collections.Generic.IReadOnlyList<byte[]>, bool>
+SharpStun.TlsClientSettings.ValidateServerCertificate.set -> void
+SharpStun.TlsStacks
+static SharpStun.DtlsStacks.BouncyCastle.get -> SharpStun.IDtlsStack
+static SharpStun.DtlsStacks.Default.get -> SharpStun.IDtlsStack
+static SharpStun.DtlsStacks.SharpDtls.get -> SharpStun.IDtlsStack
+static SharpStun.StunDtlsTransport.ConnectAsync(System.Net.IPEndPoint server, string host, System.Net.Security.RemoteCertificateValidationCallback validation, SharpStun.IDtlsStack stack, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStun.StunDtlsTransport>
+static SharpStun.StunStreamTransport.ConnectAsync(System.Net.IPEndPoint server, string tlsHost, System.Net.Security.RemoteCertificateValidationCallback validation, SharpStun.ITlsStack tlsStack, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<SharpStun.StunStreamTransport>
+static SharpStun.TlsStacks.BouncyCastle.get -> SharpStun.ITlsStack
+static SharpStun.TlsStacks.Default.get -> SharpStun.ITlsStack
+static SharpStun.TlsStacks.SharpDtls.get -> SharpStun.ITlsStack
+static SharpStun.TlsStacks.System.get -> SharpStun.ITlsStack

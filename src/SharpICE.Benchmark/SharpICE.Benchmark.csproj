@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -12,9 +12,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SharpICE\SharpICE.csproj" />
-    <ProjectReference Include="..\SharpStunServer\SharpStunServer.csproj" />
-    <ProjectReference Include="..\SharpTurnClient\SharpTurnClient.csproj" />
-    <ProjectReference Include="..\SharpTurnServer\SharpTurnServer.csproj" />
+    <ProjectReference Include="..\SharpStun\SharpStun.csproj" />
+    <ProjectReference Include="..\SharpTurn\SharpTurn.csproj" />
   </ItemGroup>
 
 </Project>

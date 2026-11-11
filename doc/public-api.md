@@ -1,15 +1,14 @@
 # Public API
 
-What the libraries of SharpICE expose is written down, and a removal from it does not build until it is written down too, an addition warns until it is. The libraries are SharpICE, SharpStunCommon, SharpStunClient, SharpStunServer,
-SharpTurnCommon, SharpTurnClient and SharpTurnServer, and two checks run on every `dotnet build` of
-each:
+What the libraries of SharpICE expose is written down, and a removal from it does not build until it is written down too, an addition warns until it is. The libraries are SharpICE, SharpStun and SharpTurn,
+and two checks run on every `dotnet build` of each:
 
 - **The API files.** `PublicAPI.Shipped.txt` and `PublicAPI.Unshipped.txt` next to each project list
   its public types and members. They are the same on all four target frameworks. Shipped is the API
   as released; Unshipped is what changed since. A public symbol missing from them is a warning, RS0016, until it is
   listed - an addition breaks no one - and a listed one that is gone fails the build with RS0017.
 - **Package validation.** Each package being built is checked for its target frameworks agreeing
-  with one another: what netstandard2.0 offers, net481, net8.0 and net10.0 have to offer too. Once a
+  with one another: what netstandard2.0 offers, net472, net8.0 and net10.0 have to offer too. Once a
   library has a release, it is compared with that release as well, and every binary or source
   breaking change fails the build with a CP error.
 
@@ -18,7 +17,7 @@ each:
 List what the RS0016 warnings name: accept their fix in the IDE ("Add to public API"), or from the command line:
 
 ```
-dotnet format analyzers src/SharpStunClient/SharpStunClient.csproj --diagnostics RS0016 --severity warn
+dotnet format analyzers src/SharpStun/SharpStun.csproj --diagnostics RS0016 --severity warn
 ```
 
 The new lines land in that project's `PublicAPI.Unshipped.txt`.
@@ -39,7 +38,7 @@ If package validation then reports a CP error, the change breaks code built agai
 framework or, once there is one, the last release. When that is intended, record it:
 
 ```
-dotnet build src/SharpStunClient/SharpStunClient.csproj -c Release -p:ApiCompatGenerateSuppressionFile=true
+dotnet build src/SharpStun/SharpStun.csproj -c Release -p:ApiCompatGenerateSuppressionFile=true
 ```
 
 That writes `CompatibilitySuppressions.xml` next to the project. Say in the pull request what broke.

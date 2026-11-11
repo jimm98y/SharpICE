@@ -1,6 +1,4 @@
-﻿using SharpStunClient;
-using SharpStunCommon;
-using SharpStunServer;
+﻿using SharpStun;
 using System;
 using System.Collections.Generic;
 using System.Net;
