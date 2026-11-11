@@ -165,6 +165,92 @@ namespace SharpICE.Tests
             }
         }
 
+        // coturn closes a data connection whose ConnectionBind it refuses, its 401 too: so the first ConnectionBind of a data
+        // connection is to carry the control connection's credentials. A proxy in front of the server closes any data connection
+        // whose first message is a ConnectionBind of no MESSAGE-INTEGRITY, as coturn would.
+        [TestMethod]
+        public async Task AuthenticatesTheFirstConnectionBindOfADataConnection()
+        {
+            using var server = new TurnServer(ServerOptions());
+            var tcp = server.ListenTcp(new IPEndPoint(IPAddress.Loopback, 0));
+            var proxy = new TcpListener(IPAddress.Loopback, 0);
+            proxy.Start();
+            var unauthenticated = new ConcurrentQueue<bool>();
+            _ = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    TcpClient accepted;
+                    try { accepted = await proxy.AcceptTcpClientAsync(); }
+                    catch (Exception) { return; }
+                    _ = ProxyAsync(accepted, tcp, unauthenticated);
+                }
+            });
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            try
+            {
+                using var client = await AllocateTcp($"turn:127.0.0.1:{((IPEndPoint)proxy.LocalEndpoint).Port}?transport=tcp");
+                var accepting = listener.AcceptTcpClientAsync();
+                using var connection = await client.ConnectPeerAsync((IPEndPoint)listener.LocalEndpoint);
+                using var peer = await Within(accepting, "the server connected to the peer");
+                await Write(connection.Stream, "hello peer");
+                Assert.AreEqual("hello peer", await Read(peer.GetStream(), "hello peer"));
+                Assert.IsTrue(unauthenticated.IsEmpty, "a ConnectionBind of no credentials was sent");
+            }
+            finally
+            {
+                listener.Stop();
+                proxy.Stop();
+            }
+        }
+
+        private static async Task ProxyAsync(TcpClient accepted, IPEndPoint server, ConcurrentQueue<bool> unauthenticated)
+        {
+            using (accepted)
+            using (var upstream = new TcpClient())
+            {
+                try
+                {
+                    await upstream.ConnectAsync(server.Address, server.Port);
+                    var from = accepted.GetStream();
+                    var to = upstream.GetStream();
+
+                    // the first message: a STUN header, then its attributes
+                    byte[] header = await ReadExactly(from, 20);
+                    byte[] first = new byte[20 + ((header[2] << 8) | header[3])];
+                    Buffer.BlockCopy(header, 0, first, 0, 20);
+                    byte[] body = await ReadExactly(from, first.Length - 20);
+                    Buffer.BlockCopy(body, 0, first, 20, body.Length);
+                    var message = StunMessage.Parse(first, 0, first.Length);
+                    if (message.Method == TurnMethod.ConnectionBind && !message.HasIntegrity && !message.HasIntegritySha256)
+                    {
+                        unauthenticated.Enqueue(true);
+                        return;
+                    }
+                    await to.WriteAsync(first, 0, first.Length);
+                    await Task.WhenAny(from.CopyToAsync(to), to.CopyToAsync(from));
+                }
+                catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException)
+                {
+                }
+            }
+        }
+
+        private static async Task<byte[]> ReadExactly(Stream stream, int count)
+        {
+            byte[] buffer = new byte[count];
+            int read = 0;
+            while (read < count)
+            {
+                int n = await stream.ReadAsync(buffer, read, count - read);
+                if (n == 0)
+                    throw new IOException("The connection ended.");
+                read += n;
+            }
+            return buffer;
+        }
+
         [TestMethod]
         public async Task AcceptsAPeerOfAPermission()
         {

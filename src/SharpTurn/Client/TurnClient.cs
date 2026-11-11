@@ -692,6 +692,7 @@ namespace SharpTurn
                 transport.DetachAfter = message => message.Method == TurnMethod.ConnectionBind && message.Class == StunMessageClass.SuccessResponse;
                 using (var bind = new StunClient(transport, _client.Options))
                 {
+                    bind.TakeCredentialsOf(_client);
                     var request = new StunMessage(TurnMethod.ConnectionBind, StunMessageClass.Request).AddConnectionId(connectionId);
                     AddSoftware(request);
                     var response = await bind.RequestAsync(request, cancellationToken).ConfigureAwait(false);

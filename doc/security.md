@@ -85,4 +85,6 @@ SHARPICE_COTURN_USER=user SHARPICE_COTURN_PASSWORD=pass SHARPICE_COTURN_PEER_ADD
 dotnet test src/SharpICE.Tests --filter FullyQualifiedName~TestCoturn
 ```
 
-  with coturn started as, for example, `turnserver -n --lt-cred-mech --user=user:pass --realm=example.org --allowed-peer-ip=192.168.1.10 --no-cli`.
+  with coturn started as, for example, `turnserver -n --lt-cred-mech --user=user:pass --realm=example.org --listening-ip=192.168.1.10 --relay-ip=192.168.1.10 --allowed-peer-ip=192.168.1.10 --cert=cert.pem --pkey=pkey.pem`. coturn refuses loopback peers, so use a LAN address. The `turns:` URI needs a host name, because SharpTurn checks the certificate against it.
+
+  On Windows, coturn builds with Visual Studio's CMake and vcpkg (its `msvc.yml` workflow), for x64: vcpkg does not offer libmicrohttpd for ARM64, and an x64 build runs under emulation there. coturn reads a path that does not start with `/` as relative to its working directory, so give `--cert` and `--pkey` relative paths.

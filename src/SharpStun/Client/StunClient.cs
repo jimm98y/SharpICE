@@ -603,6 +603,29 @@ namespace SharpStun
             }
         }
 
+        // of TURN, a data connection's client (RFC 6062 4.3): the realm, nonce and key of the control connection's, that its
+        // first ConnectionBind is of credentials - a server may close a data connection of a ConnectionBind refused, its 401
+        // too, as coturn does; a nonce of the other connection's source the server deems stale is answered of a 438
+        internal void TakeCredentialsOf(StunClient other)
+        {
+            if (other == null || other == this)
+                return;
+            lock (other._sync)
+            {
+                if (other._key == null)
+                    return;
+                lock (_sync)
+                {
+                    _realm = other._realm;
+                    _nonce = other._nonce;
+                    _key = other._key;
+                    _passwordAlgorithms = other._passwordAlgorithms;
+                    _passwordAlgorithm = other._passwordAlgorithm;
+                    _useUserhash = other._useUserhash;
+                }
+            }
+        }
+
         private void ForgetCredentials()
         {
             lock (_sync)
