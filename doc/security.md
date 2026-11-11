@@ -77,7 +77,7 @@ SHARPICE_FUZZ_ITERATIONS=1000000 dotnet test src/SharpICE.Tests --filter FullyQu
 ## Interoperability
 
 - **Chrome**: `src/SharpICE.ChromeInterop` drives a headless Chrome over its DevTools protocol, connecting an `RTCPeerConnection` with a data channel to an `IceAgent`. The scenarios cover each side offering, UDP and ICE-TCP, and mDNS names from Chrome and from SharpICE; each holds 12 s of consent checks in both directions. Run `dotnet run --project src/SharpICE.ChromeInterop [path to chrome] [scenario...]`.
-- **coturn**: `TestCoturn` runs SharpTurn's client against a coturn server given in the environment. It covers UDP allocations over UDP, TCP and TLS, permissions, channels, data in both directions, and TCP allocations (RFC 6062):
+- **coturn**: `TestCoturn` runs SharpTurn's client against a coturn server given in the environment. It covers UDP allocations over UDP, TCP, TLS with each TLS stack and DTLS with each DTLS stack, permissions, channels, data in both directions, and TCP allocations (RFC 6062) over TCP and each TLS stack:
 
 ```
 SHARPICE_COTURN_URI=turn:192.168.1.20:3478 SHARPICE_COTURN_TLS_URI=turns:turn.example.org:5349 \
@@ -85,6 +85,6 @@ SHARPICE_COTURN_USER=user SHARPICE_COTURN_PASSWORD=pass SHARPICE_COTURN_PEER_ADD
 dotnet test src/SharpICE.Tests --filter FullyQualifiedName~TestCoturn
 ```
 
-  with coturn started as, for example, `turnserver -n --lt-cred-mech --user=user:pass --realm=example.org --listening-ip=192.168.1.10 --relay-ip=192.168.1.10 --allowed-peer-ip=192.168.1.10 --cert=cert.pem --pkey=pkey.pem`. coturn refuses loopback peers, so use a LAN address. The `turns:` URI needs a host name, because SharpTurn checks the certificate against it.
+  with coturn started as, for example, `turnserver -n --lt-cred-mech --user=user:pass --realm=example.org --listening-ip=192.168.1.10 --relay-ip=192.168.1.10 --allowed-peer-ip=192.168.1.10 --cert=cert.pem --pkey=pkey.pem --dtls` (`--dtls` opens its DTLS listeners, on the TLS port). coturn refuses loopback peers, so use a LAN address. The `turns:` URI needs a host name, because SharpTurn checks the certificate against it.
 
   On Windows, coturn builds with Visual Studio's CMake and vcpkg (its `msvc.yml` workflow), for x64: vcpkg does not offer libmicrohttpd for ARM64, and an x64 build runs under emulation there. coturn reads a path that does not start with `/` as relative to its working directory, so give `--cert` and `--pkey` relative paths.
