@@ -12,7 +12,7 @@
     <ProjectReference Include="..\SharpTurnCommon\SharpTurnCommon.csproj" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'net481'">
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'net472'">
     <PackageReference Include="System.Memory" Version="4.6.3" />
   </ItemGroup>
 
