@@ -4,6 +4,8 @@ SharpICE.IceAgentOptions.IncludeTls.get -> bool
 SharpICE.IceAgentOptions.IncludeTls.set -> void
 SharpICE.IceAgentOptions.TlsCertificate.get -> System.Security.Cryptography.X509Certificates.X509Certificate2
 SharpICE.IceAgentOptions.TlsCertificate.set -> void
+SharpICE.IceAgentOptions.TlsStack.get -> SharpStunCommon.ITlsStack
+SharpICE.IceAgentOptions.TlsStack.set -> void
 SharpICE.IceCandidate.IsStream.get -> bool
 SharpICE.IceCandidate.IsTls.get -> bool
 SharpICE.IceCandidatePair.IsTls.get -> bool

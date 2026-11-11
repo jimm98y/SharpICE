@@ -218,6 +218,13 @@ namespace SharpStunServer
         public IDtlsStack DtlsStack { get; set; } = DtlsStacks.Default;
 
         /// <summary>
+        /// The TLS implementation of the listeners of TLS: of <see cref="TlsStacks.SharpDtls"/>, the default, TLS 1.3 and 1.2;
+        /// of <see cref="TlsStacks.BouncyCastle"/>, TLS 1.2 - each of a certificate of an exportable private key, as of DTLS;
+        /// of <see cref="TlsStacks.System"/>, .NET's SslStream, of any the system can use.
+        /// </summary>
+        public ITlsStack TlsStack { get; set; } = TlsStacks.Default;
+
+        /// <summary>
         /// The connections of TCP and TLS at most at once, of all listeners: past them, a new one is closed as it is accepted.
         /// </summary>
         public int MaxConnections { get; set; } = 1000;
@@ -321,8 +328,13 @@ namespace SharpStunServer
         {
             if (_options.Certificate == null)
                 throw new InvalidOperationException("TLS takes a certificate: see StunServerOptions.Certificate.");
+            lock (_sync)
+                _tls ??= (_options.TlsStack ?? TlsStacks.Default).CreateServer(_options.Certificate);
             return Listen(endPoint, true);
         }
+
+        // of the listeners of TLS: the server of the certificate, of the TLS stack of the options
+        private ITlsServer _tls;
 
         /// <summary>
         /// Answers the requests of DTLS over UDP of the address (RFC 8489 6.2.3), of the DTLS stack and the certificate of the
@@ -587,9 +599,7 @@ namespace SharpStunServer
                     Stream stream = client.GetStream();
                     if (tls)
                     {
-                        var ssl = new SslStream(stream, false);
-                        await ssl.AuthenticateAsServerAsync(_options.Certificate, false, SslProtocols.None, false).ConfigureAwait(false);
-                        stream = ssl;
+                        stream = await _tls.AcceptAsync(stream, deadline.Token).ConfigureAwait(false);
                     }
                     using (stream)
                     {
@@ -972,6 +982,7 @@ namespace SharpStunServer
             _cts.Cancel();
             lock (_sync)
             {
+                _tls?.Dispose();
                 foreach (var socket in _udp)
                     socket.Dispose();
                 foreach (var listener in _tcp)

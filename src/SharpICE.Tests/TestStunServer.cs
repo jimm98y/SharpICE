@@ -220,7 +220,8 @@ namespace SharpICE.Tests
             request.CertificateExtensions.Add(names.Build());
             using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
 #pragma warning disable SYSLIB0057
-            return new X509Certificate2(certificate.Export(X509ContentType.Pfx));
+            // of a key the default TLS stack, SharpDTLS's, can export
+            return new X509Certificate2(certificate.Export(X509ContentType.Pfx), (string)null, X509KeyStorageFlags.Exportable);
 #pragma warning restore SYSLIB0057
         }
 

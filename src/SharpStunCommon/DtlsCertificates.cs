@@ -54,7 +54,7 @@ namespace SharpStunCommon
         public static DtlsCredentials Load(X509Certificate2 certificate)
         {
             if (!certificate.HasPrivateKey)
-                throw new ArgumentException("A certificate of DTLS is of its private key.", nameof(certificate));
+                throw new ArgumentException("A certificate of DTLS or TLS is of its private key.", nameof(certificate));
             byte[] pfx;
             const string Password = "dtls";
             try
@@ -63,7 +63,7 @@ namespace SharpStunCommon
             }
             catch (System.Security.Cryptography.CryptographicException ex)
             {
-                throw new ArgumentException("A certificate of DTLS is of an exportable private key: of X509KeyStorageFlags.Exportable.", nameof(certificate), ex);
+                throw new ArgumentException("A certificate of DTLS, or of TLS of SharpDTLS or BouncyCastle, is of an exportable private key: of X509KeyStorageFlags.Exportable, or of TLS, TlsStacks.System.", nameof(certificate), ex);
             }
 
             var store = new Pkcs12StoreBuilder().Build();
@@ -105,6 +105,28 @@ namespace SharpStunCommon
             certificate.SetPublicKey(keyPair.Public);
             var signed = certificate.Generate(new Org.BouncyCastle.Crypto.Operators.Asn1SignatureFactory("SHA256WITHECDSA", keyPair.Private, random));
             return new DtlsCredentials { KeyPair = keyPair, Certificate = signed, Intermediates = new List<BcX509Certificate>() };
+        }
+
+        /// <summary>
+        /// A certificate of .NET's of its own, self-signed, of ECDSA of P-256 - of <see cref="CreateSelfSigned"/> - its private
+        /// key exportable, of a TLS stack of any library to serve of.
+        /// </summary>
+        public static X509Certificate2 CreateSelfSignedCertificate(string name)
+        {
+            var credentials = CreateSelfSigned(name);
+            var store = new Pkcs12StoreBuilder().Build();
+            var entry = new X509CertificateEntry(credentials.Certificate);
+            store.SetKeyEntry("key", new AsymmetricKeyEntry(credentials.KeyPair.Private), new[] { entry });
+            const string Password = "self";
+            using (var stream = new MemoryStream())
+            {
+                store.Save(stream, Password.ToCharArray(), new Org.BouncyCastle.Security.SecureRandom());
+#if NET9_0_OR_GREATER
+                return X509CertificateLoader.LoadPkcs12(stream.ToArray(), Password, X509KeyStorageFlags.Exportable);
+#else
+                return new X509Certificate2(stream.ToArray(), Password, X509KeyStorageFlags.Exportable);
+#endif
+            }
         }
 
         // a certificate of its DER: of .NET 9 and later of X509CertificateLoader, as the constructor of bytes is obsolete there

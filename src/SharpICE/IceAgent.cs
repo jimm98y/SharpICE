@@ -702,6 +702,7 @@ namespace SharpICE
                         CertificateValidation = _options.TurnCertificateValidation,
                         InitialRetransmissionTimeout = _options.InitialRetransmissionTimeout,
                         DtlsStack = _options.DtlsStack,
+                        TlsStack = _options.TlsStack,
                     };
                     turn = new TurnClient(options);
                     await turn.ConnectAsync(server.Uri, timeout.Token).ConfigureAwait(false);

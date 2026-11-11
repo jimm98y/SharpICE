@@ -1,2 +1,4 @@
 SharpStunServer.StunServerOptions.DtlsStack.get -> SharpStunCommon.IDtlsStack
 SharpStunServer.StunServerOptions.DtlsStack.set -> void
+SharpStunServer.StunServerOptions.TlsStack.get -> SharpStunCommon.ITlsStack
+SharpStunServer.StunServerOptions.TlsStack.set -> void

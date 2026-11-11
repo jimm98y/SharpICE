@@ -246,7 +246,8 @@ namespace SharpStunClient
 
     /// <summary>
     /// STUN over TCP, or TLS over TCP (RFC 8489 6.2.2, 6.2.3), with no framing but the messages' own lengths, as a server of
-    /// STUN alone has it. Its certificate is checked of the host name given, of the system's checks or of a callback's.
+    /// STUN alone has it. Of TLS, of a TLS stack - SharpDTLS's, the default, BouncyCastle's or .NET's SslStream - its
+    /// certificate checked of the host name given, of the system's checks or of a callback's.
     /// </summary>
     public sealed class StunStreamTransport : StunTransport
     {
@@ -254,16 +255,18 @@ namespace SharpStunClient
         private readonly Stream _stream;
         private readonly string _tlsHost;
         private readonly RemoteCertificateValidationCallback _validation;
+        private readonly ITlsStack _tlsStack;
         private readonly SemaphoreSlim _writing = new SemaphoreSlim(1, 1);
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private readonly IPEndPoint _localEndPoint;
 
-        private StunStreamTransport(TcpClient client, Stream stream, IPEndPoint server, string tlsHost, RemoteCertificateValidationCallback validation)
+        private StunStreamTransport(TcpClient client, Stream stream, IPEndPoint server, string tlsHost, RemoteCertificateValidationCallback validation, ITlsStack tlsStack)
         {
             _client = client;
             _stream = stream;
             _tlsHost = tlsHost;
             _validation = validation;
+            _tlsStack = tlsStack;
             _localEndPoint = (IPEndPoint)client.Client.LocalEndPoint;
             RemoteEndPoint = server;
             _ = ReceiveLoopAsync();
@@ -271,10 +274,15 @@ namespace SharpStunClient
 
         /// <summary>
         /// A connection to the server: of TLS, of a host name given, the name its certificate is checked of; of the callback
-        /// given, checked by it rather than by the system.
+        /// given, checked by it rather than by the system. Of TLS, of the default TLS stack.
         /// </summary>
-        public static async Task<StunStreamTransport> ConnectAsync(IPEndPoint server, string tlsHost = null, RemoteCertificateValidationCallback validation = null, CancellationToken cancellationToken = default)
+        public static Task<StunStreamTransport> ConnectAsync(IPEndPoint server, string tlsHost = null, RemoteCertificateValidationCallback validation = null, CancellationToken cancellationToken = default)
+            => ConnectAsync(server, tlsHost, validation, null, cancellationToken);
+
+        /// <summary>A connection to the server, of TLS of the TLS stack given: of null, <see cref="TlsStacks.Default"/>.</summary>
+        public static async Task<StunStreamTransport> ConnectAsync(IPEndPoint server, string tlsHost, RemoteCertificateValidationCallback validation, ITlsStack tlsStack, CancellationToken cancellationToken = default)
         {
+            tlsStack ??= TlsStacks.Default;
             var client = new TcpClient(server.AddressFamily);
             try
             {
@@ -288,11 +296,13 @@ namespace SharpStunClient
                 Stream stream = client.GetStream();
                 if (tlsHost != null)
                 {
-                    var ssl = new SslStream(stream, false, validation);
-                    await ssl.AuthenticateAsClientAsync(tlsHost).ConfigureAwait(false);
-                    stream = ssl;
+                    stream = await tlsStack.ConnectAsync(stream, new TlsClientSettings
+                    {
+                        ServerName = tlsHost,
+                        ValidateServerCertificate = chain => DtlsCertificates.Validate(chain, tlsHost, validation, client),
+                    }, cancellationToken).ConfigureAwait(false);
                 }
-                return new StunStreamTransport(client, stream, server, tlsHost, validation);
+                return new StunStreamTransport(client, stream, server, tlsHost, validation, tlsStack);
             }
             catch
             {
@@ -306,6 +316,9 @@ namespace SharpStunClient
         public override bool IsStream => true;
 
         public bool IsSecure => _tlsHost != null;
+
+        /// <summary>The TLS stack of a connection of TLS.</summary>
+        public ITlsStack TlsStack => _tlsStack;
 
         public override IPEndPoint LocalEndPoint => _localEndPoint;
 
@@ -330,7 +343,7 @@ namespace SharpStunClient
         }
 
         public override async Task<StunTransport> RedirectAsync(IPEndPoint server, string domain, CancellationToken cancellationToken = default)
-            => await ConnectAsync(server, IsSecure ? domain ?? _tlsHost : null, _validation, cancellationToken).ConfigureAwait(false);
+            => await ConnectAsync(server, IsSecure ? domain ?? _tlsHost : null, _validation, _tlsStack, cancellationToken).ConfigureAwait(false);
 
         private async Task ReceiveLoopAsync()
         {

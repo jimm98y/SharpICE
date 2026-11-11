@@ -73,6 +73,12 @@ namespace SharpStunClient
         public IDtlsStack DtlsStack { get; set; } = DtlsStacks.Default;
 
         /// <summary>
+        /// The TLS implementation of a server of TLS: of <see cref="TlsStacks.SharpDtls"/>, the default, TLS 1.3 and 1.2; of
+        /// <see cref="TlsStacks.BouncyCastle"/>, TLS 1.2; of <see cref="TlsStacks.System"/>, .NET's SslStream.
+        /// </summary>
+        public ITlsStack TlsStack { get; set; } = TlsStacks.Default;
+
+        /// <summary>
         /// Whether to take SHA-256 of a server that lists it among its password algorithms, whatever its order: as a TURN client
         /// is to (RFC 8656 6), rather than the first of the list (RFC 8489 9.2.5).
         /// </summary>
@@ -239,7 +245,7 @@ namespace SharpStunClient
                 {
                     StunTransport transport = dtls
                         ? await StunDtlsTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, options.DtlsStack, cancellationToken).ConfigureAwait(false)
-                        : await StunStreamTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, cancellationToken).ConfigureAwait(false);
+                        : await StunStreamTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, options.TlsStack, cancellationToken).ConfigureAwait(false);
                     Connect(transport, servers.Skip(i + 1).ToList(), tlsHost);
                     return;
                 }
@@ -645,7 +651,7 @@ namespace SharpStunClient
                 {
                     transport = _transport is StunUdpTransport ? new StunUdpTransport(server)
                         : _transport is StunDtlsTransport dtls ? await StunDtlsTransport.ConnectAsync(server, _tlsHost, _options.CertificateValidation, dtls.Stack, cancellationToken).ConfigureAwait(false)
-                        : await StunStreamTransport.ConnectAsync(server, _tlsHost, _options.CertificateValidation, cancellationToken).ConfigureAwait(false);
+                        : await StunStreamTransport.ConnectAsync(server, _tlsHost, _options.CertificateValidation, ((StunStreamTransport)_transport).TlsStack, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception e) when (IsConnectionFailure(e))
                 {

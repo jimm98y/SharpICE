@@ -684,7 +684,9 @@ namespace SharpTurnClient
         private async Task<TurnTcpConnection> BindConnectionAsync(IPEndPoint peer, uint connectionId, CancellationToken cancellationToken)
         {
             var control = _client.Transport ?? throw new InvalidOperationException("The client is not connected.");
-            var transport = await StunStreamTransport.ConnectAsync(control.RemoteEndPoint, _client.TlsHost, _client.Options.CertificateValidation, cancellationToken).ConfigureAwait(false);
+            // of the control connection's TLS stack, of one of TLS
+            var tlsStack = (control as StunStreamTransport)?.TlsStack ?? _client.Options.TlsStack;
+            var transport = await StunStreamTransport.ConnectAsync(control.RemoteEndPoint, _client.TlsHost, _client.Options.CertificateValidation, tlsStack, cancellationToken).ConfigureAwait(false);
             try
             {
                 // nothing of the connection read as STUN past its ConnectionBind's success

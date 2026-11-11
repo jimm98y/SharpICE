@@ -24,7 +24,6 @@ using ReadTask = System.Threading.Tasks.ValueTask<bool>;
 #else
 using ReadTask = System.Threading.Tasks.Task<bool>;
 #endif
-using SharpDTLS;
 using SharpStunClient;
 using SharpStunCommon;
 using SharpTurnClient;
@@ -54,8 +53,8 @@ namespace SharpICE
         // the discard port, which an active candidate says it is of (RFC 6544 4.5)
         private const int ActivePort = 9;
 
-        // of TLS: the server the passive candidates' connections are answered of, of the agent's certificate
-        private TlsServer _tlsServer;
+        // of TLS: the server the passive candidates' connections are answered of, of the agent's certificate and TLS stack
+        private ITlsServer _tlsServer;
 
         // the connections to passive candidates being made - of a TLS handshake, or of a relay's ConnectionBind - of the
         // connections' limit too
@@ -204,10 +203,8 @@ namespace SharpICE
             if (_tlsServer == null)
             {
                 // of the certificate given, else of one of the agent's own, of ECDSA
-                var credentials = _options.TlsCertificate != null
-                    ? DtlsCertificates.Load(_options.TlsCertificate)
-                    : DtlsCertificates.CreateSelfSigned("SharpICE");
-                var server = new TlsServer(credentials.KeyPair, credentials.Certificate) { IntermediateCertificates = credentials.Intermediates };
+                var certificate = _options.TlsCertificate ?? DtlsCertificates.CreateSelfSignedCertificate("SharpICE");
+                var server = (_options.TlsStack ?? TlsStacks.Default).CreateServer(certificate);
                 lock (_sync)
                 {
                     if (_closed)
@@ -375,11 +372,11 @@ namespace SharpICE
             {
                 using (var timeout = new CancellationTokenSource(_options.TcpCheckTimeout))
                 {
-                    var stream = await TlsStream.AcceptAsync(_tlsServer, client.GetStream(), timeout.Token).ConfigureAwait(false);
+                    var stream = await _tlsServer.AcceptAsync(client.GetStream(), timeout.Token).ConfigureAwait(false);
                     connection = new IceTcpConnection(client, stream);
                 }
             }
-            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is OperationCanceledException || ex is InvalidOperationException || ex is DtlsException)
+            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is OperationCanceledException || ex is InvalidOperationException)
             {
                 Trace($"TLS of {SafeRemote(client)} failed: {ex.Message}");
             }
@@ -444,7 +441,7 @@ namespace SharpICE
                     : await ConnectDirectAsync(pair).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is SocketException || ex is ObjectDisposedException || ex is IOException || ex is OperationCanceledException
-                || ex is InvalidOperationException || ex is DtlsException || ex is TurnException || ex is StunException)
+                || ex is InvalidOperationException || ex is TurnException || ex is StunException)
             {
                 lock (_sync)
                 {
@@ -480,7 +477,7 @@ namespace SharpICE
         private async Task<IceTcpConnection> ConnectDirectAsync(IceCandidatePair pair)
         {
             var client = new TcpClient(pair.RemoteEndPoint.AddressFamily);
-            TlsStream tls = null;
+            Stream tls = null;
             try
             {
                 var deadline = DateTime.UtcNow + TcpConnectTimeout;
@@ -497,7 +494,7 @@ namespace SharpICE
                     var left = deadline - DateTime.UtcNow;
                     using (var timeout = new CancellationTokenSource(left > TimeSpan.Zero ? left : TimeSpan.FromMilliseconds(1)))
                     {
-                        tls = await TlsStream.ConnectAsync(client.GetStream(), c => c.ServerCertificateValidator = (leaf, chain) => true, timeout.Token).ConfigureAwait(false);
+                        tls = await (_options.TlsStack ?? TlsStacks.Default).ConnectAsync(client.GetStream(), new TlsClientSettings(), timeout.Token).ConfigureAwait(false);
                     }
                 }
             }

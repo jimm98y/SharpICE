@@ -74,6 +74,14 @@ namespace SharpICE
         /// </summary>
         public SharpStunCommon.IDtlsStack DtlsStack { get; set; } = SharpStunCommon.DtlsStacks.Default;
 
+        /// <summary>
+        /// The TLS implementation of a TURN server of TLS ("turns:..."), and of ICE-TCP over TLS (<see cref="IncludeTls"/>): of
+        /// <see cref="SharpStunCommon.TlsStacks.SharpDtls"/>, the default, TLS 1.3 and 1.2; of
+        /// <see cref="SharpStunCommon.TlsStacks.BouncyCastle"/>, TLS 1.2; of <see cref="SharpStunCommon.TlsStacks.System"/>,
+        /// .NET's SslStream.
+        /// </summary>
+        public SharpStunCommon.ITlsStack TlsStack { get; set; } = SharpStunCommon.TlsStacks.Default;
+
         /// <summary>Whether to gather candidates of IPv6 addresses too, link-local ones left out.</summary>
         public bool IncludeIPv6 { get; set; } = true;
 

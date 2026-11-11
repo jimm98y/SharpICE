@@ -76,7 +76,7 @@ namespace SharpStunCommon
         public IDtlsServer CreateServer(DtlsServerSettings settings) => new Server(settings ?? throw new ArgumentNullException(nameof(settings)));
 
         // the credentials of a certificate of .NET's, as BouncyCastle's TLS has them
-        private static (Certificate Chain, AsymmetricKeyParameter Key, bool IsEcdsa) Credentials(TlsCrypto crypto, System.Security.Cryptography.X509Certificates.X509Certificate2 certificate)
+        internal static (Certificate Chain, AsymmetricKeyParameter Key, bool IsEcdsa) Credentials(TlsCrypto crypto, System.Security.Cryptography.X509Certificates.X509Certificate2 certificate)
         {
             var loaded = DtlsCertificates.Load(certificate);
             var chain = new[] { loaded.Certificate }.Concat(loaded.Intermediates).Select(c => crypto.CreateCertificate(c.GetEncoded())).ToArray();
@@ -394,21 +394,23 @@ namespace SharpStunCommon
         }
 
         /// <summary>
-        /// A DTLS 1.2 server of an X.509 certificate of .NET's, its private key exportable: of RSA, or of ECDSA, its cipher suites
-        /// of ECDHE of that key.
+        /// A DTLS 1.2 server - or of TLS, a TLS 1.2 one - of an X.509 certificate of .NET's, its private key exportable: of RSA,
+        /// or of ECDSA, its cipher suites of ECDHE of that key.
         /// </summary>
-        private sealed class BcServer : DefaultTlsServer
+        internal sealed class BcServer : DefaultTlsServer
         {
             private readonly (Certificate Chain, AsymmetricKeyParameter Key, bool IsEcdsa) _credentials;
             private readonly int _timeout;
+            private readonly ProtocolVersion[] _versions;
 
-            public BcServer(TlsCrypto crypto, (Certificate Chain, AsymmetricKeyParameter Key, bool IsEcdsa) credentials, int timeout) : base(crypto)
+            public BcServer(TlsCrypto crypto, (Certificate Chain, AsymmetricKeyParameter Key, bool IsEcdsa) credentials, int timeout, ProtocolVersion[] versions = null) : base(crypto)
             {
                 _credentials = credentials;
                 _timeout = timeout;
+                _versions = versions ?? ProtocolVersion.DTLSv12.Only();
             }
 
-            protected override ProtocolVersion[] GetSupportedVersions() => ProtocolVersion.DTLSv12.Only();
+            protected override ProtocolVersion[] GetSupportedVersions() => _versions;
 
             public override int GetHandshakeTimeoutMillis() => _timeout;
 
