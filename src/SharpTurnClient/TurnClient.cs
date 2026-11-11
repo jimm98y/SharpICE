@@ -1,5 +1,5 @@
 ﻿// SharpTurnClient
-// Copyright (C) 2026 Lukas Volf
+// Copyright (C) 2026 Lukas Volf, assisted by Claude Code
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
