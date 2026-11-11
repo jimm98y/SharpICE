@@ -1,3 +1,5 @@
+SharpICE.IceAgentOptions.DtlsStack.get -> SharpStunCommon.IDtlsStack
+SharpICE.IceAgentOptions.DtlsStack.set -> void
 SharpICE.IceAgentOptions.IncludeTls.get -> bool
 SharpICE.IceAgentOptions.IncludeTls.set -> void
 SharpICE.IceAgentOptions.TlsCertificate.get -> System.Security.Cryptography.X509Certificates.X509Certificate2

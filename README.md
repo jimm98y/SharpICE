@@ -5,7 +5,7 @@ STUN, TURN and ICE written in C#, netstandard2.0 and NET10 without any native de
 A STUN client - Session Traversal Utilities for NAT [RFC8489](https://www.rfc-editor.org/rfc/rfc8489):
 1. Long-term credentials: PASSWORD-ALGORITHMS, USERHASH, stale nonces, and responses checked of their integrity
 1. Short-term credentials, as ICE's
-1. UDP, retransmitted; TCP; TLS over it; and DTLS 1.3 and 1.2 over UDP, of [SharpDTLS](https://github.com/jimm98y/SharpDTLS): the server's certificate checked of its host name
+1. UDP, retransmitted; TCP; TLS over it; and DTLS over UDP: the server's certificate checked of its host name. DTLS of a stack of `DtlsStack`: [SharpDTLS](https://github.com/jimm98y/SharpDTLS), the default, of DTLS 1.3 and 1.2, or BouncyCastle, of DTLS 1.2
 1. ALTERNATE-SERVER and ALTERNATE-DOMAIN: a request redirected, never twice to one server
 1. Unknown comprehension-required attributes: a transaction of them failed, a request of them answered with a 420
 1. STUN and TURN URIs [RFC7064](https://www.rfc-editor.org/rfc/rfc7064), [RFC7065](https://www.rfc-editor.org/rfc/rfc7065), a host of no port looked up of DNS SRV [RFC2782](https://www.rfc-editor.org/rfc/rfc2782), each of its servers tried in turn
@@ -20,9 +20,10 @@ IPEndPoint mapped = await client.GetMappedAddressAsync();
 // any request, sent again of the credentials as the server asks for them
 StunMessage response = await client.RequestAsync(new StunMessage(StunMethod.Binding, StunMessageClass.Request));
 
-// of DTLS rather than TLS
+// of DTLS rather than TLS: of SharpDTLS, or of BouncyCastle's DTLS
 using var dtls = new StunClient(new StunClientOptions { UseDtls = true });
 await dtls.ConnectAsync("stuns:stun.example.org");
+using var bc = new StunClient(new StunClientOptions { UseDtls = true, DtlsStack = DtlsStacks.BouncyCastle });
 
 // the Binding method alone, of a socket
 var server = await StunClient.ResolveAsync("stun.l.google.com:19302");
@@ -31,7 +32,7 @@ IPEndPoint address = await StunClient.GetMappedAddressAsync(server, TimeSpan.Fro
 
 ## SharpStunServer
 A STUN server of the Binding method [RFC8489](https://www.rfc-editor.org/rfc/rfc8489), independent of SharpStunClient:
-1. Over UDP, TCP, TLS and DTLS, each listener of its own; DTLS 1.3 and 1.2 of SharpDTLS, of a cookie exchange [RFC6347](https://www.rfc-editor.org/rfc/rfc6347), [RFC9147](https://www.rfc-editor.org/rfc/rfc9147) before any association
+1. Over UDP, TCP, TLS and DTLS, each listener of its own; DTLS of a cookie exchange [RFC6347](https://www.rfc-editor.org/rfc/rfc6347), [RFC9147](https://www.rfc-editor.org/rfc/rfc9147) before any association, of the stack of `DtlsStack`: SharpDTLS, the default, of DTLS 1.3 and 1.2 and a fragmented ClientHello reassembled, or BouncyCastle, of DTLS 1.2, a thread of each association and a ClientHello of one record alone
 1. Long-term credentials, if a realm is given: the checks of RFC 8489 9.2.4 in their order, MD5 and SHA-256, USERHASH, stateless nonces of the nonce cookie and of the source, stale ones answered 438
 1. ALTERNATE-SERVER and ALTERNATE-DOMAIN, of the request's source
 1. Unknown comprehension-required attributes answered with a 420 - which attributes are known an option, as are the methods redirected; indications, responses and other methods dropped

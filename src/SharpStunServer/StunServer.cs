@@ -24,7 +24,6 @@ using ReadTask = System.Threading.Tasks.ValueTask<bool>;
 #else
 using ReadTask = System.Threading.Tasks.Task<bool>;
 #endif
-using SharpDTLS;
 using SharpStunCommon;
 using System;
 using System.Buffers;
@@ -213,11 +212,17 @@ namespace SharpStunServer
         public TimeSpan DtlsIdleTimeout { get; set; } = TimeSpan.FromMinutes(1);
 
         /// <summary>
+        /// The DTLS implementation of the listeners of DTLS: of <see cref="DtlsStacks.SharpDtls"/>, the default, DTLS 1.3 and
+        /// 1.2; of <see cref="DtlsStacks.BouncyCastle"/>, DTLS 1.2, a thread of each association.
+        /// </summary>
+        public IDtlsStack DtlsStack { get; set; } = DtlsStacks.Default;
+
+        /// <summary>
         /// The connections of TCP and TLS at most at once, of all listeners: past them, a new one is closed as it is accepted.
         /// </summary>
         public int MaxConnections { get; set; } = 1000;
 
-        /// <summary>The associations of DTLS at most at once - a thread each - of each listener: past them, a new peer is ignored.</summary>
+        /// <summary>The associations of DTLS at most at once of each listener: past them, a new peer is ignored.</summary>
         public int MaxDtlsPeers { get; set; } = 1000;
 
         /// <summary>
@@ -320,20 +325,21 @@ namespace SharpStunServer
         }
 
         /// <summary>
-        /// Answers the requests of DTLS 1.3 and 1.2 over UDP of the address (RFC 8489 6.2.3), of SharpDTLS and the certificate
-        /// of the options - its private key exportable - an association of each peer, of a cookie exchange first (RFC 6347
-        /// 4.2.1, RFC 9147 5.1), so that a source forged makes none; the address bound.
+        /// Answers the requests of DTLS over UDP of the address (RFC 8489 6.2.3), of the DTLS stack and the certificate of the
+        /// options - its private key exportable - an association of each peer, of a cookie exchange first (RFC 6347 4.2.1, RFC
+        /// 9147 5.1), so that a source forged makes none; the address bound.
         /// </summary>
         public IPEndPoint ListenDtls(IPEndPoint endPoint)
         {
             if (_options.Certificate == null)
                 throw new InvalidOperationException("DTLS takes a certificate: see StunServerOptions.Certificate.");
-            var credentials = DtlsCertificates.Load(_options.Certificate);
-
             var socket = new Socket(endPoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            IDtlsServer dtls;
+            var peers = new ConcurrentDictionary<IPEndPoint, DtlsPeer>();
             try
             {
                 socket.Bind(endPoint);
+                dtls = CreateDtlsServer(socket, peers);
             }
             catch
             {
@@ -342,9 +348,9 @@ namespace SharpStunServer
             }
             lock (_sync)
                 _udp.Add(socket);
-            _ = ServeDtlsAsync(socket, credentials);
+            _ = ServeDtlsAsync(socket, dtls, peers);
             var bound = (IPEndPoint)socket.LocalEndPoint;
-            Trace($"DTLS on {bound}");
+            Trace($"DTLS of {(_options.DtlsStack ?? DtlsStacks.Default).Name} on {bound}");
             return bound;
         }
 
@@ -355,50 +361,42 @@ namespace SharpStunServer
             public DateTime LastReceived = DateTime.UtcNow;
         }
 
-        private async Task ServeDtlsAsync(Socket socket, DtlsCredentials credentials)
+        private IDtlsServer CreateDtlsServer(Socket socket, ConcurrentDictionary<IPEndPoint, DtlsPeer> peers)
         {
             var sender = new UdpSender(socket);
             var local = (IPEndPoint)socket.LocalEndPoint;
-            var transport = new DtlsServerTransport(sender);
-            var dtls = new DtlsServer(transport, credentials.KeyPair, credentials.Certificate)
+            IDtlsServer dtls = null;
+            dtls = (_options.DtlsStack ?? DtlsStacks.Default).CreateServer(new DtlsServerSettings
             {
-                IntermediateCertificates = credentials.Intermediates,
-                // a HelloVerifyRequest, or of DTLS 1.3 a HelloRetryRequest, of a cookie before any state of the peer's
-                RequireCookie = true,
-            };
-            var peers = new ConcurrentDictionary<EndPoint, DtlsPeer>();
-
-            dtls.ConnectionCreated += (s, association) => peers.TryAdd(association.RemoteEndPoint, new DtlsPeer());
-            dtls.HandshakeFinished += (s, association) =>
-            {
-                var from = (IPEndPoint)association.RemoteEndPoint;
-                var peer = peers.GetOrAdd(from, _ => new DtlsPeer());
-                var writing = new object();
-                peer.Connection = new StunServerConnection(StunServerProtocol.Dtls, local, from, (data, offset, length) =>
+                Certificate = _options.Certificate,
+                SendDatagram = (to, buffer, offset, count) => sender.SendTo(buffer, offset, count, to),
+                Established = from =>
                 {
-                    // of an array of its own, as SharpDTLS takes a record's data
-                    byte[] record = new byte[length];
-                    Buffer.BlockCopy(data, offset, record, 0, length);
-                    lock (writing)
-                        association.SendApplicationData(record);
-                });
-                Trace($"DTLS of {from}");
-            };
-            dtls.ApplicationDataReceived += (s, e) =>
-            {
-                if (peers.TryGetValue(e.RemoteEndPoint, out var peer) && peer.Connection != null)
-                    ReceiveSafely(peer.Connection, e.Data, 0, e.Data.Length);
-            };
-            dtls.ConnectionClosed += (s, association) =>
-            {
-                if (!peers.TryRemove(association.RemoteEndPoint, out var peer))
-                    return;
-                Trace($"DTLS of {association.RemoteEndPoint} ended");
-                if (peer.Connection != null)
-                    ConnectionClosed?.Invoke(this, peer.Connection);
-            };
+                    var peer = peers.GetOrAdd(from, _ => new DtlsPeer());
+                    peer.Connection = new StunServerConnection(StunServerProtocol.Dtls, local, from, (data, offset, length) => dtls.Send(from, data, offset, length));
+                    Trace($"DTLS of {from}");
+                },
+                RecordReceived = (from, buffer, offset, count) =>
+                {
+                    if (peers.TryGetValue(from, out var peer) && peer.Connection != null)
+                        ReceiveSafely(peer.Connection, buffer, offset, count);
+                },
+                Closed = from =>
+                {
+                    if (!peers.TryRemove(from, out var peer))
+                        return;
+                    Trace($"DTLS of {from} ended");
+                    if (peer.Connection != null)
+                        ConnectionClosed?.Invoke(this, peer.Connection);
+                },
+            });
+            return dtls;
+        }
 
+        private async Task ServeDtlsAsync(Socket socket, IDtlsServer dtls, ConcurrentDictionary<IPEndPoint, DtlsPeer> peers)
+        {
             // the associations of no datagram of their peer's for too long - a handshake left, or a peer gone - closed
+            using (dtls)
             using (var idle = new Timer(_ => CloseIdle(dtls, peers), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1)))
             {
                 byte[] buffer = new byte[65536];
@@ -422,21 +420,19 @@ namespace SharpStunServer
                         continue;
 
                     var from = receiver.RemoteEndPoint;
-                    if (peers.TryGetValue(from, out var peer))
+                    if (dtls.HasAssociation(from))
                     {
-                        peer.LastReceived = DateTime.UtcNow;
+                        peers.GetOrAdd(from, _ => new DtlsPeer()).LastReceived = DateTime.UtcNow;
                     }
-                    else if (peers.Count >= _options.MaxDtlsPeers)
+                    else if (dtls.Peers.Count >= _options.MaxDtlsPeers)
                     {
                         // a peer of no association: past the limit, its ClientHello left unanswered
                         Trace($"DTLS of {from} refused: {_options.MaxDtlsPeers} associations already");
                         continue;
                     }
-                    byte[] datagram = new byte[received];
-                    Buffer.BlockCopy(buffer, 0, datagram, 0, received);
                     try
                     {
-                        transport.Deliver(from, datagram);
+                        dtls.Receive(from, buffer, 0, received);
                     }
                     catch (Exception ex)
                     {
@@ -445,35 +441,19 @@ namespace SharpStunServer
                     }
                 }
             }
-            foreach (var association in dtls.Connections)
-                CloseQuietly(association);
         }
 
-        private void CloseIdle(DtlsServer dtls, ConcurrentDictionary<EndPoint, DtlsPeer> peers)
+        private void CloseIdle(IDtlsServer dtls, ConcurrentDictionary<IPEndPoint, DtlsPeer> peers)
         {
             var now = DateTime.UtcNow;
-            foreach (var association in dtls.Connections)
+            foreach (var from in dtls.Peers)
             {
-                if (!peers.TryGetValue(association.RemoteEndPoint, out var peer) || now - peer.LastReceived > _options.DtlsIdleTimeout)
+                var peer = peers.GetOrAdd(from, _ => new DtlsPeer());
+                if (now - peer.LastReceived > _options.DtlsIdleTimeout)
                 {
-                    Trace($"DTLS of {association.RemoteEndPoint} idle");
-                    CloseQuietly(association);
-                    // of an association that ends of no alert of its own: its peer forgotten of the listener all the same
-                    if (peers.TryRemove(association.RemoteEndPoint, out peer) && peer.Connection != null)
-                        ConnectionClosed?.Invoke(this, peer.Connection);
+                    Trace($"DTLS of {from} idle");
+                    dtls.Close(from);
                 }
-            }
-        }
-
-        private static void CloseQuietly(TlsConnectionBase association)
-        {
-            try
-            {
-                // its close_notify
-                association.Close();
-            }
-            catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is InvalidOperationException)
-            {
             }
         }
 

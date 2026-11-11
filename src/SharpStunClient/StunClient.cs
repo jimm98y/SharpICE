@@ -67,6 +67,12 @@ namespace SharpStunClient
         public bool UseDtls { get; set; }
 
         /// <summary>
+        /// The DTLS implementation of a server of DTLS: of <see cref="DtlsStacks.SharpDtls"/>, the default, DTLS 1.3 and 1.2;
+        /// of <see cref="DtlsStacks.BouncyCastle"/>, DTLS 1.2.
+        /// </summary>
+        public IDtlsStack DtlsStack { get; set; } = DtlsStacks.Default;
+
+        /// <summary>
         /// Whether to take SHA-256 of a server that lists it among its password algorithms, whatever its order: as a TURN client
         /// is to (RFC 8656 6), rather than the first of the list (RFC 8489 9.2.5).
         /// </summary>
@@ -232,7 +238,7 @@ namespace SharpStunClient
                 try
                 {
                     StunTransport transport = dtls
-                        ? await StunDtlsTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, cancellationToken).ConfigureAwait(false)
+                        ? await StunDtlsTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, options.DtlsStack, cancellationToken).ConfigureAwait(false)
                         : await StunStreamTransport.ConnectAsync(servers[i], tlsHost, options.CertificateValidation, cancellationToken).ConfigureAwait(false);
                     Connect(transport, servers.Skip(i + 1).ToList(), tlsHost);
                     return;
@@ -638,7 +644,7 @@ namespace SharpStunClient
                 try
                 {
                     transport = _transport is StunUdpTransport ? new StunUdpTransport(server)
-                        : _transport is StunDtlsTransport ? await StunDtlsTransport.ConnectAsync(server, _tlsHost, _options.CertificateValidation, cancellationToken).ConfigureAwait(false)
+                        : _transport is StunDtlsTransport dtls ? await StunDtlsTransport.ConnectAsync(server, _tlsHost, _options.CertificateValidation, dtls.Stack, cancellationToken).ConfigureAwait(false)
                         : await StunStreamTransport.ConnectAsync(server, _tlsHost, _options.CertificateValidation, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception e) when (IsConnectionFailure(e))
