@@ -532,5 +532,23 @@ namespace SharpICE.Tests
                 sockets.ForEach(s => s.Dispose());
             }
         }
+
+        [TestMethod]
+        public void RefusesAStunMessageOfMoreAttributesThanOneHas()
+        {
+            // a Binding request of attributes of no value, of a type of no comprehension asked (SOFTWARE)
+            static byte[] Of(int attributes)
+            {
+                byte[] message = new byte[StunMessage.HeaderLength + 4 * attributes];
+                message[1] = 0x01;
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(2), (ushort)(4 * attributes));
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(message.AsSpan(4), StunMessage.MagicCookie);
+                for (int i = 0; i < attributes; i++)
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(message.AsSpan(StunMessage.HeaderLength + 4 * i), 0x8022);
+                return message;
+            }
+            Assert.IsNotNull(StunMessage.Parse(Of(10), 0, Of(10).Length));
+            Assert.IsNull(StunMessage.Parse(Of(65), 0, Of(65).Length));
+        }
     }
 }
