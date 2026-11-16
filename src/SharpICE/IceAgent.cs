@@ -155,6 +155,8 @@ namespace SharpICE
         private readonly List<IceCandidate> _localCandidates = new List<IceCandidate>();
         private readonly List<IceCandidate> _remoteCandidates = new List<IceCandidate>();
         private readonly List<IceCandidatePair> _pairs = new List<IceCandidatePair>();
+        private readonly List<Outgoing> _sends = new List<Outgoing>();
+        private readonly List<IceCandidatePair> _connects = new List<IceCandidatePair>();
 
         // of the foundations of peer reflexive candidates: one of each, as some may have been dropped
         private int _peerReflexiveFoundations;
@@ -1219,8 +1221,11 @@ namespace SharpICE
                 return;
             try
             {
-                var sends = new List<Outgoing>();
-                var connects = new List<IceCandidatePair>();
+                // of each tick, the agent's own: a tick is of one at a time
+                var sends = _sends;
+                var connects = _connects;
+                sends.Clear();
+                connects.Clear();
                 IceConnectionState? newState = null;
                 lock (_sync)
                 {
@@ -1320,12 +1325,32 @@ namespace SharpICE
         // of whose pairs is waiting or in progress (RFC 8445 6.1.4.2)
         private IceCandidatePair NextOrdinaryCheck()
         {
-            var waiting = _pairs.Where(p => p.State == IceCandidatePairState.Waiting && IsCheckable(p)).OrderByDescending(p => p.Priority).FirstOrDefault();
-            if (waiting != null)
-                return waiting;
-            var busy = new HashSet<string>(_pairs.Where(p => p.State == IceCandidatePairState.Waiting || p.State == IceCandidatePairState.InProgress).Select(p => p.Foundation));
-            return _pairs.Where(p => p.State == IceCandidatePairState.Frozen && IsCheckable(p) && !busy.Contains(p.Foundation))
-                .OrderByDescending(p => p.Priority).FirstOrDefault();
+            // of each tick: of loops, of no allocation; of equal priorities, the first, as OrderByDescending's
+            IceCandidatePair best = null;
+            foreach (var p in _pairs)
+            {
+                if (p.State == IceCandidatePairState.Waiting && IsCheckable(p) && (best == null || p.Priority > best.Priority))
+                    best = p;
+            }
+            if (best != null)
+                return best;
+            foreach (var p in _pairs)
+            {
+                if (p.State == IceCandidatePairState.Frozen && IsCheckable(p) && (best == null || p.Priority > best.Priority) && !IsBusy(p.Foundation))
+                    best = p;
+            }
+            return best;
+        }
+
+        // under the lock: whether a pair of the foundation is waiting or in progress
+        private bool IsBusy(string foundation)
+        {
+            foreach (var p in _pairs)
+            {
+                if ((p.State == IceCandidatePairState.Waiting || p.State == IceCandidatePairState.InProgress) && p.Foundation == foundation)
+                    return true;
+            }
+            return false;
         }
 
         // of TCP, a pair of the agent's active candidate, or one of a connection there is
