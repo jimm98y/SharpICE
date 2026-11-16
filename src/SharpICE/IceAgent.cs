@@ -1458,9 +1458,10 @@ namespace SharpICE
                 {
                     if (selected?.Connection == connection)
                         return true;
+                    // of a connection of its own to a passive candidate, the pair is there before any check: of one validated
                     foreach (var pair in _pairs)
                     {
-                        if (pair.Connection == connection)
+                        if (pair.Connection == connection && pair.Validated && pair.State != IceCandidatePairState.Failed)
                             return true;
                     }
                     return false;
@@ -1471,7 +1472,7 @@ namespace SharpICE
                 // any address it signalled, which anyone may send of
                 foreach (var pair in _pairs)
                 {
-                    if (pair.Base == local && pair.Connection == null && pair.Validated && pair.RemoteEndPoint.Equals(from))
+                    if (pair.Base == local && pair.Connection == null && pair.Validated && pair.State != IceCandidatePairState.Failed && pair.RemoteEndPoint.Equals(from))
                         return true;
                 }
                 return false;

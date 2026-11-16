@@ -148,6 +148,8 @@ namespace SharpSTUN
     public sealed class StunMessage
     {
         public const int HeaderLength = 20;
+        // of a message: a Binding request is of 6 or so, a TURN one of a dozen
+        private const int MaxAttributes = 64;
         public const uint MagicCookie = 0x2112A442;
         public const int TransactionIdLength = 12;
 
@@ -272,6 +274,9 @@ namespace SharpSTUN
                     continue;
                 }
 
+                // of more than a message has, refused before each is allocated, as none is authenticated yet
+                if (message.Attributes.Count >= MaxAttributes)
+                    return null;
                 message.Attributes.Add(new StunAttribute(attributeType, datagram.Slice(position + 4, length).ToArray()));
                 position += 4 + ((length + 3) & ~3);
             }
