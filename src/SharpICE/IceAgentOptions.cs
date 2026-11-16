@@ -166,7 +166,7 @@ namespace SharpICE
         public int PortMax { get; set; } = 0;
 
         /// <summary>The pacing of its checks: one every Ta (RFC 8445 14.2).</summary>
-        public TimeSpan CheckInterval { get; set; } = TimeSpan.FromMilliseconds(20);
+        public TimeSpan CheckInterval { get; set; } = TimeSpan.FromMilliseconds(50);
 
         /// <summary>The first retransmission timeout of a check, doubled at each retransmission (RFC 8489 6.2.1).</summary>
         public TimeSpan InitialRetransmissionTimeout { get; set; } = TimeSpan.FromMilliseconds(250);
