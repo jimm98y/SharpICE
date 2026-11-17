@@ -1828,7 +1828,8 @@ namespace SharpICE
                 pair.State = IceCandidatePairState.Succeeded;
                 pair.LastConsent = pair.LastSucceeded = DateTime.UtcNow;
                 pair.Validated = true;
-                Trace($"Check succeeded: {pair}");
+                if (_options.Trace != null) // the message made of a listener alone: this is of each consent check
+                    Trace($"Check succeeded: {pair}");
 
                 // the pairs of its foundation unfrozen (RFC 8445 7.2.5.3.3)
                 foreach (var other in _pairs)
