@@ -60,7 +60,36 @@ namespace SharpICE
         public List<KeyValuePair<string, string>> Extensions { get; } = new List<KeyValuePair<string, string>>();
 
         /// <summary>The endpoint of a candidate of an IP address; null of one of a name, or of a port that is none.</summary>
-        public IPEndPoint EndPoint => Port >= 0 && Port <= IPEndPoint.MaxPort && IPAddress.TryParse(Address, out IPAddress address) ? new IPEndPoint(address, Port) : null;
+        // made again only of another address or port, all three of one object written at once: each binding request compares
+        // the peer's candidates with its source
+        private sealed class ParsedEndPoint
+        {
+            public string Address;
+            public int Port;
+            public IPEndPoint EndPoint;
+        }
+
+        private ParsedEndPoint _endPoint;
+
+        public IPEndPoint EndPoint
+        {
+            get
+            {
+                string address = Address;
+                int port = Port;
+                var parsed = _endPoint;
+                if (parsed == null || !ReferenceEquals(address, parsed.Address) || port != parsed.Port)
+                {
+                    _endPoint = parsed = new ParsedEndPoint
+                    {
+                        Address = address,
+                        Port = port,
+                        EndPoint = port >= 0 && port <= IPEndPoint.MaxPort && IPAddress.TryParse(address, out IPAddress ip) ? new IPEndPoint(ip, port) : null,
+                    };
+                }
+                return parsed.EndPoint;
+            }
+        }
 
         public bool IsUdp => string.Equals(Transport, "udp", StringComparison.OrdinalIgnoreCase);
 
