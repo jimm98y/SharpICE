@@ -19,6 +19,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+using System;
+
 namespace SharpSTUN
 {
     /// <summary>
@@ -40,6 +42,14 @@ namespace SharpSTUN
                 table[i] = crc;
             }
             return table;
+        }
+
+        internal static uint Compute(ReadOnlySpan<byte> data)
+        {
+            uint crc = 0xFFFFFFFF;
+            for (int i = 0; i < data.Length; i++)
+                crc = Table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+            return crc ^ 0xFFFFFFFF;
         }
 
         public static uint Compute(byte[] buffer, int offset, int count)

@@ -74,6 +74,48 @@ namespace SharpSTUN
         /// <summary>The padding of a value of the length: up to 4 bytes (RFC 8489 14).</summary>
         public static int Padding(int length) => (4 - (length & 3)) & 3;
 
+        /// <summary>An attribute of the value given, its padding zeroed: the bytes written.</summary>
+        internal static int WriteBytesAttribute(Span<byte> destination, ushort type, ReadOnlySpan<byte> value)
+        {
+            WriteAttributeHeader(destination, type, value.Length);
+            value.CopyTo(destination.Slice(AttributeHeaderLength));
+            int padding = Padding(value.Length);
+            destination.Slice(AttributeHeaderLength + value.Length, padding).Clear();
+            return AttributeHeaderLength + value.Length + padding;
+        }
+
+        /// <summary>
+        /// The MESSAGE-INTEGRITY of the key, if one is given (RFC 8489 14.5), then the FINGERPRINT (RFC 8489 14.7), after the
+        /// message's attributes ending at <paramref name="end"/>; its header's length set to each as they are computed. The
+        /// message's length, as <see cref="StunMessage.ToBytes(byte[], bool)"/> writes them.
+        /// </summary>
+        internal static int WriteIntegrityAndFingerprint(Span<byte> message, int end, byte[] key)
+        {
+            if (key != null)
+            {
+                BinaryPrimitives.WriteUInt16BigEndian(message.Slice(2), (ushort)(end - StunMessage.HeaderLength + AttributeHeaderLength + 20));
+                HmacSha1(key, message.Slice(0, end), message.Slice(end + AttributeHeaderLength, 20));
+                WriteAttributeHeader(message.Slice(end), StunAttributeType.MessageIntegrity, 20);
+                end += AttributeHeaderLength + 20;
+            }
+            BinaryPrimitives.WriteUInt16BigEndian(message.Slice(2), (ushort)(end - StunMessage.HeaderLength + 8));
+            uint crc = Crc32.Compute(message.Slice(0, end)) ^ StunMessage.FingerprintXor;
+            WriteAttributeHeader(message.Slice(end), StunAttributeType.Fingerprint, 4);
+            BinaryPrimitives.WriteUInt32BigEndian(message.Slice(end + AttributeHeaderLength), crc);
+            return end + 8;
+        }
+
+        /// <summary>The HMAC-SHA1 of the data, of the key, into the 20 bytes of the destination: of no allocation on .NET.</summary>
+        internal static void HmacSha1(byte[] key, ReadOnlySpan<byte> data, Span<byte> destination)
+        {
+#if NET6_0_OR_GREATER
+            HMACSHA1.HashData(key, data, destination);
+#else
+            using (var hmac = new HMACSHA1(key))
+                hmac.ComputeHash(data.ToArray()).AsSpan(0, 20).CopyTo(destination);
+#endif
+        }
+
         /// <summary>The bytes an XOR-ed address attribute of the endpoint takes, its header too.</summary>
         public static int XorAddressSize(IPEndPoint endPoint) => AttributeHeaderLength + 4 + (endPoint.AddressFamily == AddressFamily.InterNetwork ? 4 : 16);
 

@@ -31,6 +31,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -225,6 +226,27 @@ namespace SharpICE
         private readonly Dictionary<string, IPAddress> _mdnsResolved = new Dictionary<string, IPAddress>();
         private readonly List<IceCandidate> _mdnsWaiting = new List<IceCandidate>();
         private byte[] _remoteKey;
+
+        // the credentials of the binding requests and checks as bytes, of the strings they were made of: of no allocation of each
+        private sealed class LocalCredentials
+        {
+            public string Ufrag, Password;
+            public byte[] UsernamePrefix, Key;
+        }
+
+        private sealed class CheckUsername
+        {
+            public string Remote, Local;
+            public byte[] Bytes;
+        }
+
+        private LocalCredentials _localCredentials;
+        private CheckUsername _checkUsername;
+        private byte[] _software;
+
+        // the responses written of the agent's own buffer, taken while one is written and sent, given back after: not of each
+        // thread, as the receiving loops go from one thread of the pool to another; a second loop at once makes its own
+        private byte[] _stunBuffer;
 
         public IceAgent(IceAgentOptions options = null)
         {
@@ -1373,29 +1395,55 @@ namespace SharpICE
             if (pair.TransactionId != null)
                 _transactions.Remove(Key(pair.TransactionId));
 
-            var request = new StunMessage(StunMethod.Binding, StunMessageClass.Request);
-            request.AddString(StunAttributeType.Username, RemoteUfrag + ":" + LocalUfrag);
-            // the priority of the peer reflexive candidate the check may make of the pair's local one (RFC 8445 7.1.1)
-            request.AddUInt32(StunAttributeType.Priority, IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, pair.Local.LocalPreference, IceCandidate.RtpComponent, pair.Local.IsTcp));
+            var username = _checkUsername;
+            if (username == null || !ReferenceEquals(username.Remote, RemoteUfrag) || !ReferenceEquals(username.Local, LocalUfrag))
+                _checkUsername = username = new CheckUsername { Remote = RemoteUfrag, Local = LocalUfrag, Bytes = Encoding.UTF8.GetBytes(RemoteUfrag + ":" + LocalUfrag) };
+            byte[] software = Software();
             pair.CheckRole = Role;
-            if (Role == IceRole.Controlling)
+            bool controlling = Role == IceRole.Controlling;
+            if (controlling)
             {
-                request.AddUInt64(StunAttributeType.IceControlling, TieBreaker);
                 // nominated by a check of the pair that succeeded: once, and on a pair that works (RFC 8445 8.1.1)
-                pair.Nominating = pair.State == IceCandidatePairState.Succeeded && !_pairs.Any(p => p.Nominated && p != pair) && (pair.Nominating || !pair.Nominated);
-                if (pair.Nominating)
-                    request.AddAttribute(StunAttributeType.UseCandidate, new byte[0]);
+                bool otherNominated = false;
+                foreach (var p in _pairs)
+                {
+                    if (p.Nominated && p != pair)
+                    {
+                        otherNominated = true;
+                        break;
+                    }
+                }
+                pair.Nominating = pair.State == IceCandidatePairState.Succeeded && !otherNominated && (pair.Nominating || !pair.Nominated);
             }
             else
             {
-                request.AddUInt64(StunAttributeType.IceControlled, TieBreaker);
                 pair.Nominating = false;
             }
-            if (_options.Software != null)
-                request.AddString(StunAttributeType.Software, _options.Software);
 
-            pair.Request = request.ToBytes(_remoteKey);
-            pair.TransactionId = request.TransactionId;
+            // as StunMessage.ToBytes writes it, into the pair's request again where it is of the same size, of its transaction
+            // ID again: its retransmissions are of the last one alone
+            int size = StunMessage.HeaderLength + 4 + username.Bytes.Length + StunWriter.Padding(username.Bytes.Length) + 8 + 12
+                + (pair.Nominating ? 4 : 0) + (software != null ? 4 + software.Length + StunWriter.Padding(software.Length) : 0) + 24 + 8;
+            byte[] request = pair.Request != null && pair.Request.Length == size ? pair.Request : new byte[size];
+            byte[] transactionId = pair.TransactionId ?? new byte[StunMessage.TransactionIdLength];
+            StunWriter.NewTransactionId(transactionId);
+            int position = StunMessage.HeaderLength;
+            position += StunWriter.WriteBytesAttribute(request.AsSpan(position), StunAttributeType.Username, username.Bytes);
+            Span<byte> value = stackalloc byte[8];
+            // the priority of the peer reflexive candidate the check may make of the pair's local one (RFC 8445 7.1.1)
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(value, IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, pair.Local.LocalPreference, IceCandidate.RtpComponent, pair.Local.IsTcp));
+            position += StunWriter.WriteBytesAttribute(request.AsSpan(position), StunAttributeType.Priority, value.Slice(0, 4));
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(value, TieBreaker);
+            position += StunWriter.WriteBytesAttribute(request.AsSpan(position), controlling ? StunAttributeType.IceControlling : StunAttributeType.IceControlled, value);
+            if (pair.Nominating)
+                position += StunWriter.WriteBytesAttribute(request.AsSpan(position), StunAttributeType.UseCandidate, ReadOnlySpan<byte>.Empty);
+            if (software != null)
+                position += StunWriter.WriteBytesAttribute(request.AsSpan(position), StunAttributeType.Software, software);
+            StunWriter.WriteHeader(request, StunMethod.Binding, StunMessageClass.Request, position - StunMessage.HeaderLength, transactionId);
+            StunWriter.WriteIntegrityAndFingerprint(request, position, _remoteKey);
+
+            pair.Request = request;
+            pair.TransactionId = transactionId;
             pair.Transmissions = 1;
             pair.Timeout = _options.InitialRetransmissionTimeout;
             pair.CheckStarted = now;
@@ -1405,11 +1453,11 @@ namespace SharpICE
                 : pair.Timeout);
             // of a pair that worked too - its consent, or its nomination - which goes back to it if no answer comes
             pair.State = IceCandidatePairState.InProgress;
-            _transactions[Key(request.TransactionId)] = pair;
+            _transactions[Key(transactionId)] = pair;
             return pair.Request;
         }
 
-        private static StunTransactionKey Key(byte[] transactionId) => new StunTransactionKey(transactionId);
+        private static StunTransactionKey Key(ReadOnlySpan<byte> transactionId) => new StunTransactionKey(transactionId);
 
         #endregion // Checks
 
@@ -1456,15 +1504,16 @@ namespace SharpICE
         private void OnDatagram(LocalBase local, IceTcpConnection connection, byte[] buffer, int offset, int count, IPEndPoint from)
         {
             from = Normalize(from);
-            if (StunMessage.IsStun(new ReadOnlySpan<byte>(buffer, offset, count)))
+            var datagram = new ReadOnlySpan<byte>(buffer, offset, count);
+            if (StunMessage.IsStun(datagram))
             {
-                var message = StunMessage.Parse(buffer, offset, count);
-                if (message == null)
+                // read in place, of no message made of it
+                if (!StunView.TryParse(datagram, out var message))
                     return;
                 if (message.Class == StunMessageClass.Request && message.Method == StunMethod.Binding)
                     OnBindingRequest(local, connection, message, from);
                 else if (message.Class == StunMessageClass.SuccessResponse || message.Class == StunMessageClass.ErrorResponse)
-                    OnResponse(local, connection, message, from);
+                    OnResponse(local, connection, message, from, buffer, offset, count);
                 // an indication - a keepalive (RFC 8445 11) - asks for nothing
                 return;
             }
@@ -1508,35 +1557,46 @@ namespace SharpICE
         internal static IPEndPoint Normalize(IPEndPoint endPoint)
             => endPoint.Address.IsIPv4MappedToIPv6 ? new IPEndPoint(endPoint.Address.MapToIPv4(), endPoint.Port) : endPoint;
 
-        private void OnBindingRequest(LocalBase local, IceTcpConnection connection, StunMessage request, IPEndPoint from)
+        private void OnBindingRequest(LocalBase local, IceTcpConnection connection, StunView request, IPEndPoint from)
         {
             // RFC 8445 7.3: of the username of our ufrag first, signed with our password
             if (!request.HasFingerprint || !request.VerifyFingerprint())
                 return;
-            string username = request.Username;
             string localUfrag, localPassword;
             lock (_sync)
             {
                 localUfrag = LocalUfrag;
                 localPassword = LocalPassword;
             }
-            byte[] localKey = StunMessage.ShortTermKey(localPassword);
-            if (username == null || !username.StartsWith(localUfrag + ":", StringComparison.Ordinal))
+            // the prefix and key of the ufrag and password as they are, made again only of new ones
+            var credentials = _localCredentials;
+            if (credentials == null || !ReferenceEquals(credentials.Ufrag, localUfrag) || !ReferenceEquals(credentials.Password, localPassword))
             {
-                SendError(local, connection, request, from, StunErrorCode.BadRequest, "Bad Request", null);
+                _localCredentials = credentials = new LocalCredentials
+                {
+                    Ufrag = localUfrag,
+                    Password = localPassword,
+                    UsernamePrefix = Encoding.UTF8.GetBytes(localUfrag + ":"),
+                    Key = StunMessage.ShortTermKey(localPassword),
+                };
+            }
+            byte[] localKey = credentials.Key;
+            if (!request.UsernameStartsWith(credentials.UsernamePrefix))
+            {
+                SendError(local, connection, request.TransactionId, from, StunErrorCode.BadRequest, "Bad Request", null);
                 return;
             }
             if (!request.VerifyIntegrity(localKey))
             {
-                SendError(local, connection, request, from, StunErrorCode.Unauthorized, "Unauthorized", null);
+                SendError(local, connection, request.TransactionId, from, StunErrorCode.Unauthorized, "Unauthorized", null);
                 return;
             }
 
             // of an attribute it is not to be understood without, a 420 that lists them (RFC 8489 6.3.1.1)
-            var unknown = request.GetUnknownComprehensionRequired();
-            if (unknown.Count > 0)
+            if (request.HasUnknownComprehensionRequired())
             {
-                var error = new StunMessage(StunMethod.Binding, StunMessageClass.ErrorResponse, request.TransactionId)
+                var unknown = request.GetUnknownComprehensionRequired();
+                var error = new StunMessage(StunMethod.Binding, StunMessageClass.ErrorResponse, request.TransactionId.ToArray())
                     .AddError(StunErrorCode.UnknownAttribute, "Unknown Attribute")
                     .AddUnknownAttributes(unknown);
                 SendStun(new Outgoing(local, connection, error.ToBytes(localKey), from));
@@ -1552,13 +1612,13 @@ namespace SharpICE
 
                 // RFC 8445 7.3.1.1: of both controlling, or both controlled, the greater tie-breaker controls; a lite agent
                 // never does
-                ulong? controlling = request.IceControlling;
-                ulong? controlled = request.IceControlled;
+                ulong? controlling = request.GetUInt64(StunAttributeType.IceControlling);
+                ulong? controlled = request.GetUInt64(StunAttributeType.IceControlled);
                 if (Role == IceRole.Controlling && controlling != null)
                 {
                     if (TieBreaker >= controlling.Value)
                     {
-                        SendError(local, connection, request, from, StunErrorCode.RoleConflict, "Role Conflict", localKey);
+                        SendError(local, connection, request.TransactionId, from, StunErrorCode.RoleConflict, "Role Conflict", localKey);
                         return;
                     }
                     SwitchRole(IceRole.Controlled);
@@ -1573,7 +1633,7 @@ namespace SharpICE
                     }
                     else
                     {
-                        SendError(local, connection, request, from, StunErrorCode.RoleConflict, "Role Conflict", localKey);
+                        SendError(local, connection, request.TransactionId, from, StunErrorCode.RoleConflict, "Role Conflict", localKey);
                         return;
                     }
                 }
@@ -1582,7 +1642,15 @@ namespace SharpICE
                 // one of the connection it made
                 bool tcp = connection != null;
                 string transport = tcp ? "tcp" : "udp";
-                var remote = _remoteCandidates.FirstOrDefault(c => (tcp ? SameTransport(c, local.Candidate) : c.IsUdp) && Equals(c.EndPoint, from));
+                IceCandidate remote = null;
+                foreach (var c in _remoteCandidates)
+                {
+                    if ((tcp ? SameTransport(c, local.Candidate) : c.IsUdp) && Equals(c.EndPoint, from))
+                    {
+                        remote = c;
+                        break;
+                    }
+                }
                 if (remote == null)
                 {
                     // Peer reflexive candidates come of checks whose source may be spoofed, or replayed from new sources, or
@@ -1598,7 +1666,7 @@ namespace SharpICE
                         Foundation = "p" + (++_peerReflexiveFoundations).ToString(CultureInfo.InvariantCulture),
                         Component = IceCandidate.RtpComponent,
                         Transport = transport,
-                        Priority = request.Priority ?? IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, 0, IceCandidate.RtpComponent, tcp),
+                        Priority = request.GetUInt32(StunAttributeType.Priority) ?? IceCandidate.ComputePriority(IceCandidateType.PeerReflexive, 0, IceCandidate.RtpComponent, tcp),
                         Address = from.Address.ToString(),
                         Port = from.Port,
                         Type = IceCandidateType.PeerReflexive,
@@ -1609,9 +1677,15 @@ namespace SharpICE
                     Trace($"Peer reflexive {remote}");
                 }
 
-                var pair = tcp
-                    ? _pairs.FirstOrDefault(p => p.Connection == connection)
-                    : _pairs.FirstOrDefault(p => p.Base == local && p.Connection == null && p.RemoteEndPoint.Equals(from));
+                IceCandidatePair pair = null;
+                foreach (var p in _pairs)
+                {
+                    if (tcp ? p.Connection == connection : p.Base == local && p.Connection == null && p.RemoteEndPoint.Equals(from))
+                    {
+                        pair = p;
+                        break;
+                    }
+                }
                 if (pair == null)
                 {
                     pair = new IceCandidatePair(local, remote, from) { Connection = connection };
@@ -1635,7 +1709,7 @@ namespace SharpICE
 
                 // nominated by the controlling agent (RFC 8445 7.3.1.5): selected once a check of ours on it succeeds too; of a
                 // lite agent, which checks nothing, as it is
-                if (Role == IceRole.Controlled && request.UseCandidate)
+                if (Role == IceRole.Controlled && request.HasAttribute(StunAttributeType.UseCandidate))
                 {
                     if (!pair.Nominated)
                         Trace($"Nominated by the peer: {pair}");
@@ -1656,20 +1730,29 @@ namespace SharpICE
                 }
             }
 
-            var response = new StunMessage(StunMethod.Binding, StunMessageClass.SuccessResponse, request.TransactionId);
-            response.AddXorAddress(from);
-            if (_options.Software != null)
-                response.AddString(StunAttributeType.Software, _options.Software);
-            SendStun(new Outgoing(local, connection, response.ToBytes(localKey), from));
+            // as StunMessage.ToBytes writes it, of the agent's buffer
+            byte[] software = Software();
+            int size = StunMessage.HeaderLength + StunWriter.XorAddressSize(from) + (software != null ? 4 + software.Length + StunWriter.Padding(software.Length) : 0) + 24 + 8;
+            byte[] buffer = Interlocked.Exchange(ref _stunBuffer, null);
+            if (buffer == null || buffer.Length < size)
+                buffer = new byte[Math.Max(size, 256)];
+            var transactionId = request.TransactionId;
+            int position = StunMessage.HeaderLength;
+            position += StunWriter.WriteXorAddress(buffer.AsSpan(position), StunAttributeType.XorMappedAddress, from, transactionId);
+            if (software != null)
+                position += StunWriter.WriteBytesAttribute(buffer.AsSpan(position), StunAttributeType.Software, software);
+            StunWriter.WriteHeader(buffer, StunMethod.Binding, StunMessageClass.SuccessResponse, position - StunMessage.HeaderLength, transactionId);
+            SendStun(local, connection, buffer, StunWriter.WriteIntegrityAndFingerprint(buffer, position, localKey), from);
+            _stunBuffer = buffer;
 
             if (roleChanged)
                 Trace($"Role switched to {Role}");
             AfterSelect(selectedNow);
         }
 
-        private void SendError(LocalBase local, IceTcpConnection connection, StunMessage request, IPEndPoint to, int code, string reason, byte[] key)
+        private void SendError(LocalBase local, IceTcpConnection connection, ReadOnlySpan<byte> transactionId, IPEndPoint to, int code, string reason, byte[] key)
         {
-            var response = new StunMessage(StunMethod.Binding, StunMessageClass.ErrorResponse, request.TransactionId);
+            var response = new StunMessage(StunMethod.Binding, StunMessageClass.ErrorResponse, transactionId.ToArray());
             response.AddError(code, reason);
             SendStun(new Outgoing(local, connection, response.ToBytes(key), to));
         }
@@ -1682,7 +1765,7 @@ namespace SharpICE
                 pair.Priority = PairPriority(pair);
         }
 
-        private void OnResponse(LocalBase local, IceTcpConnection connection, StunMessage response, IPEndPoint from)
+        private void OnResponse(LocalBase local, IceTcpConnection connection, StunView response, IPEndPoint from, byte[] buffer, int offset, int count)
         {
             var key = Key(response.TransactionId);
             TaskCompletionSource<IPEndPoint> gathering;
@@ -1694,9 +1777,11 @@ namespace SharpICE
                     return;
                 // of an attribute it is not to be understood without, the transaction failed (RFC 8489 6.3.3)
                 // of a server of classic STUN, its retired attributes taken as known (RFC 8489 18.3.1)
-                gathering.TrySetResult(response.GetUnknownComprehensionRequired(t => StunAttributeType.IsKnown(t) || StunAttributeType.IsRetired(t)).Count > 0
+                // of a server's answer, rare: of the message made of it
+                var message = StunMessage.Parse(buffer, offset, count);
+                gathering.TrySetResult(message.GetUnknownComprehensionRequired(t => StunAttributeType.IsKnown(t) || StunAttributeType.IsRetired(t)).Count > 0
                     ? null
-                    : StunClient.GetMappedAddress(response));
+                    : StunClient.GetMappedAddress(message));
                 return;
             }
 
@@ -1717,10 +1802,10 @@ namespace SharpICE
                 }
 
                 // of an attribute it is not to be understood without, the check failed as of an error (RFC 8489 6.3.3)
-                if (response.Class == StunMessageClass.ErrorResponse || response.GetUnknownComprehensionRequired().Count > 0)
+                if (response.Class == StunMessageClass.ErrorResponse || response.HasUnknownComprehensionRequired())
                 {
-                    var error = response.Error;
-                    if (error?.Code == StunErrorCode.RoleConflict)
+                    int? errorCode = response.ErrorCode;
+                    if (errorCode == StunErrorCode.RoleConflict)
                     {
                         // RFC 8445 7.2.5.1: the role opposite to the one the request was sent in - unless another 487
                         // switched it already - and the check again
@@ -1735,7 +1820,7 @@ namespace SharpICE
                     else
                     {
                         pair.State = pair.LastSucceeded > DateTime.MinValue ? IceCandidatePairState.Succeeded : IceCandidatePairState.Failed;
-                        Trace($"Check failed with {error?.Code} {error?.Reason}: {pair}");
+                        Trace($"Check failed with {errorCode} {response.ErrorReason}: {pair}");
                     }
                     return;
                 }
@@ -1803,31 +1888,46 @@ namespace SharpICE
 
         #region Sending
 
-        private void SendStun(Outgoing outgoing)
+        private void SendStun(Outgoing outgoing) => SendStun(outgoing.Base, outgoing.Connection, outgoing.Bytes, outgoing.Bytes.Length, outgoing.To);
+
+        private void SendStun(LocalBase local, IceTcpConnection connection, byte[] bytes, int length, IPEndPoint to)
         {
-            if (outgoing.Connection != null)
+            if (connection != null)
             {
-                outgoing.Connection.Send(outgoing.Bytes, 0, outgoing.Bytes.Length);
+                connection.Send(bytes, 0, length);
                 return;
             }
-            if (outgoing.Base.Turn != null)
+            if (local.Turn != null)
             {
-                _ = SendRelayedAsync(outgoing.Base.Turn, outgoing.To, outgoing.Bytes, 0, outgoing.Bytes.Length);
+                // of a copy: sent once a permission is installed, the buffer the caller's again at once
+                _ = SendRelayedAsync(local.Turn, to, bytes.AsSpan(0, length).ToArray(), 0, length);
                 return;
             }
-            if (outgoing.Base.Socket == null)
+            if (local.Socket == null)
                 return;
             try
             {
-                outgoing.Base.Sender.SendTo(outgoing.Bytes, 0, outgoing.Bytes.Length, outgoing.To);
+                local.Sender.SendTo(bytes, 0, length, to);
             }
             catch (ObjectDisposedException)
             {
             }
             catch (SocketException ex)
             {
-                Trace($"Send to {outgoing.To} failed: {ex.SocketErrorCode}");
+                Trace($"Send to {to} failed: {ex.SocketErrorCode}");
             }
+        }
+
+        // the SOFTWARE of the options as bytes, made once
+        private byte[] Software()
+        {
+            string software = _options.Software;
+            if (software == null)
+                return null;
+            var bytes = _software;
+            if (bytes == null)
+                _software = bytes = Encoding.UTF8.GetBytes(software);
+            return bytes;
         }
 
         /// <summary>Sends a datagram on the selected pair - of TCP, framed (RFC 4571). False of none selected yet, or of one that failed.</summary>

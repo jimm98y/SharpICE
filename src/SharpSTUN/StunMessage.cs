@@ -154,7 +154,7 @@ namespace SharpSTUN
         public const int TransactionIdLength = 12;
 
         // RFC 8489 14.7: the CRC-32 of the message, XOR-ed with this
-        private const uint FingerprintXor = 0x5354554E;
+        internal const uint FingerprintXor = 0x5354554E;
         private const int IntegrityLength = 20;
         private const int IntegritySha256Length = 32;
 
