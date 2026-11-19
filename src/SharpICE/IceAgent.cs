@@ -207,6 +207,8 @@ namespace SharpICE
         private readonly Dictionary<StunTransactionKey, TaskCompletionSource<IPEndPoint>> _gatherings = new Dictionary<StunTransactionKey, TaskCompletionSource<IPEndPoint>>();
 
         private Timer _timer;
+        private TimeSpan _tickInterval;
+        private static readonly TimeSpan IdleCheckInterval = TimeSpan.FromMilliseconds(250);
         private int _ticking;
         private bool _gathered;
         private bool _started;
@@ -1185,6 +1187,7 @@ namespace SharpICE
                 _lastRemoteCandidate = DateTime.UtcNow;
             }
             SetState(IceConnectionState.Checking);
+            _tickInterval = _options.CheckInterval;
             _timer = new Timer(_ => Tick(), null, TimeSpan.Zero, _options.CheckInterval);
         }
 
@@ -1323,6 +1326,18 @@ namespace SharpICE
                             newState = IceConnectionState.Failed;
                         else if (_pairs.Count == 0 && _remoteGatheringComplete && now - _remoteGatheringCompletedAt > _options.DisconnectedTimeout)
                             newState = IceConnectionState.Failed;
+                    }
+
+                    // of a pair selected and no check in flight, waiting or triggered, what is left is the consent's of seconds:
+                    // of a tick of 250 ms, not of Ta - of 200 agents, 3,200 callbacks a second fewer
+                    bool idle = selected != null && _triggered.Count == 0;
+                    for (int i = 0; idle && i < _pairs.Count; i++)
+                        idle = _pairs[i].State == IceCandidatePairState.Succeeded || _pairs[i].State == IceCandidatePairState.Failed;
+                    TimeSpan interval = idle && IdleCheckInterval > _options.CheckInterval ? IdleCheckInterval : _options.CheckInterval;
+                    if (interval != _tickInterval)
+                    {
+                        _tickInterval = interval;
+                        _timer?.Change(interval, interval);
                     }
                 }
 
