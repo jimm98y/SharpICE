@@ -101,7 +101,9 @@ namespace SharpICE
     {
         // ICE's ufrag of at least 24 bits of randomness and pwd of 128 (RFC 8445 5.3), of the ice-char of RFC 8839
         private const string IceChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        private const int MaxDatagram = 65536;
+        // of a socket of UDP, what a datagram is of at most: a jumbo frame's - WebRTC keeps to the path's MTU, and a larger one
+        // is IP's fragments - not the 64 KB of UDP's limit, of each socket of each agent of a server's
+        private const int MaxDatagram = 9216;
 
         // how long after the last of the peer's candidates its pairs, all failed, fail the agent, of no end-of-candidates
         private static readonly TimeSpan TrickleWait = TimeSpan.FromSeconds(5);
