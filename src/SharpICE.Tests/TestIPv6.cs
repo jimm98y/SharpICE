@@ -181,5 +181,27 @@ namespace SharpICE.Tests
             Assert.AreEqual(IPAddress.IPv6Loopback, address, "of a AAAA record");
             Assert.IsNull(await resolver.ResolveAsync(name, new[] { IPAddress.IPv6Loopback }, false, TimeSpan.FromMilliseconds(300)), "of no IPv6 asked for");
         }
+
+        [TestMethod]
+        public void ASenderOfPeersInTurnSendsEachItsOwn()
+        {
+            // of a dual socket, to an IPv4 and an IPv6 peer in turn: the address of the last peer kept is not another's
+            using var dual = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+            dual.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+            using var v4 = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            v4.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            using var v6 = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp);
+            v6.Bind(new IPEndPoint(IPAddress.IPv6Loopback, 0));
+            v4.ReceiveTimeout = v6.ReceiveTimeout = 5000;
+            var sender = new UdpSender(dual);
+            var buffer = new byte[16];
+            for (byte i = 0; i < 4; i++)
+            {
+                sender.SendTo(new[] { i }, 0, 1, (IPEndPoint)v4.LocalEndPoint);
+                sender.SendTo(new[] { (byte)(100 + i) }, 0, 1, (IPEndPoint)v6.LocalEndPoint);
+                Assert.AreEqual(1, v4.Receive(buffer)); Assert.AreEqual(i, buffer[0]);
+                Assert.AreEqual(1, v6.Receive(buffer)); Assert.AreEqual(100 + i, buffer[0]);
+            }
+        }
     }
 }

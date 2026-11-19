@@ -108,7 +108,16 @@ namespace SharpSTUN
 
         private readonly Socket _socket;
 #if NET8_0_OR_GREATER
-        private readonly Dictionary<IPEndPoint, SocketAddress> _addresses = new Dictionary<IPEndPoint, SocketAddress>();
+        private sealed class Peer
+        {
+            internal readonly IPEndPoint EndPoint;
+            internal readonly SocketAddress Address;
+            internal Peer(IPEndPoint endPoint, SocketAddress address) { EndPoint = endPoint; Address = address; }
+        }
+
+        private readonly Dictionary<IPEndPoint, Peer> _addresses = new Dictionary<IPEndPoint, Peer>();
+        // the peer of the last datagram, read without the lock: a socket sends to its selected pair's peer above all
+        private volatile Peer _last;
 #endif
 
         public UdpSender(Socket socket) => _socket = socket;
@@ -129,19 +138,24 @@ namespace SharpSTUN
 
         private SocketAddress AddressOf(IPEndPoint to)
         {
+            var last = _last;
+            if (last != null && (ReferenceEquals(last.EndPoint, to) || last.EndPoint.Equals(to)))
+                return last.Address;
             lock (_addresses)
             {
-                if (_addresses.TryGetValue(to, out var address))
-                    return address;
-                if (_addresses.Count >= MaxAddresses)
-                    _addresses.Clear();
-                // of a dual socket, an IPv4 address as the IPv6 one it is mapped to, as SendTo of an endpoint has it
-                var endPoint = _socket.AddressFamily == AddressFamily.InterNetworkV6 && to.AddressFamily == AddressFamily.InterNetwork
-                    ? new IPEndPoint(to.Address.MapToIPv6(), to.Port)
-                    : to;
-                address = endPoint.Serialize();
-                _addresses[to] = address;
-                return address;
+                if (!_addresses.TryGetValue(to, out var peer))
+                {
+                    if (_addresses.Count >= MaxAddresses)
+                        _addresses.Clear();
+                    // of a dual socket, an IPv4 address as the IPv6 one it is mapped to, as SendTo of an endpoint has it
+                    var endPoint = _socket.AddressFamily == AddressFamily.InterNetworkV6 && to.AddressFamily == AddressFamily.InterNetwork
+                        ? new IPEndPoint(to.Address.MapToIPv6(), to.Port)
+                        : to;
+                    peer = new Peer(to, endPoint.Serialize());
+                    _addresses[to] = peer;
+                }
+                _last = peer;
+                return peer.Address;
             }
         }
 #endif
