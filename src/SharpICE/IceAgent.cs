@@ -211,6 +211,15 @@ namespace SharpICE
         private Timer _timer;
         private TimeSpan _tickInterval;
         private static readonly TimeSpan IdleCheckInterval = TimeSpan.FromMilliseconds(250);
+        // the agents idle, of one timer of all of them, each tick queued of it to the pool: of a timer of each, the 1000 of a
+        //  server of 1000 connections fired together, 4000 a second, and fought over the timer queue's lock
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<IceAgent, bool> s_idle = new System.Collections.Concurrent.ConcurrentDictionary<IceAgent, bool>();
+        private static readonly WaitCallback s_tick = agent => ((IceAgent)agent).Tick();
+        private static readonly Timer s_idleTimer = new Timer(_ =>
+        {
+            foreach (var idle in s_idle)
+                ThreadPool.UnsafeQueueUserWorkItem(s_tick, idle.Key);
+        }, null, IdleCheckInterval, IdleCheckInterval);
         private int _ticking;
         private bool _gathered;
         private bool _started;
@@ -1339,7 +1348,12 @@ namespace SharpICE
                     if (interval != _tickInterval)
                     {
                         _tickInterval = interval;
-                        _timer?.Change(interval, interval);
+                        bool shared = interval == IdleCheckInterval;
+                        _timer?.Change(shared ? Timeout.InfiniteTimeSpan : interval, shared ? Timeout.InfiniteTimeSpan : interval);
+                        if (shared)
+                            s_idle[this] = true;
+                        else
+                            s_idle.TryRemove(this, out _);
                     }
                 }
 
@@ -2051,6 +2065,7 @@ namespace SharpICE
                 _turns.Clear();
             }
             _timer?.Dispose();
+            s_idle.TryRemove(this, out _);
             foreach (var local in _bases)
             {
                 local.Socket?.Dispose();
