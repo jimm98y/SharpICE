@@ -463,6 +463,9 @@ namespace SharpICE
             return ordered;
         }
 
+        // where an agent of a range of ports starts to look for one free, of all agents
+        private static int s_nextPort = -1;
+
         private Socket Bind(IPAddress address)
         {
             var socket = new Socket(address.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
@@ -477,8 +480,12 @@ namespace SharpICE
 
                 if (_options.PortMin > 0 && _options.PortMax >= _options.PortMin)
                 {
-                    for (int port = _options.PortMin; port <= _options.PortMax; port++)
+                    // of the port after the last taken on: of each from the first, the 1000th agent of a range tried the 999 taken
+                    //  before it, of an exception each - of 1000 viewers, 1.5 million
+                    int count = _options.PortMax - _options.PortMin + 1, first = (int)((uint)Interlocked.Increment(ref s_nextPort) % (uint)count);
+                    for (int i = 0; i < count; i++)
                     {
+                        int port = _options.PortMin + (first + i) % count;
                         try
                         {
                             socket.Bind(new IPEndPoint(address, port));

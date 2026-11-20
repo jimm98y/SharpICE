@@ -283,9 +283,10 @@ namespace SharpICE
         {
             if (_options.PortMin > 0 && _options.PortMax >= _options.PortMin)
             {
-                for (int port = _options.PortMin; port <= _options.PortMax; port++)
+                int count = _options.PortMax - _options.PortMin + 1, first = (int)((uint)Interlocked.Increment(ref s_nextPort) % (uint)count);
+                for (int i = 0; i < count; i++)
                 {
-                    var listener = new TcpListener(address, port);
+                    var listener = new TcpListener(address, _options.PortMin + (first + i) % count);
                     try
                     {
                         listener.Start();

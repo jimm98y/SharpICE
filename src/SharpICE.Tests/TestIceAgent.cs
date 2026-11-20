@@ -25,6 +25,37 @@ namespace SharpICE.Tests
             AddressFilter = address => IPAddress.IsLoopback(address) && address.AddressFamily == AddressFamily.InterNetwork,
         });
 
+        [TestMethod]
+        public async Task EachAgentOfARangeOfPortsTakesOneFree()
+        {
+            using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            int min = Math.Min(((IPEndPoint)probe.LocalEndPoint).Port, 65000), max = min + 2;
+            probe.Dispose();
+            var agents = Enumerable.Range(0, 4).Select(_ => new IceAgent(new IceAgentOptions
+            {
+                IncludeLoopback = true,
+                AddressFilter = address => IPAddress.IsLoopback(address) && address.AddressFamily == AddressFamily.InterNetwork,
+                PortMin = min,
+                PortMax = max,
+            })).ToArray();
+            try
+            {
+                foreach (var agent in agents)
+                    await agent.GatherCandidatesAsync();
+                var ports = agents.SelectMany(a => a.LocalCandidates).Select(c => c.Port).ToArray();
+                Assert.IsTrue(ports.Length >= 1 && ports.Length <= 3, string.Join(",", ports));
+                Assert.IsTrue(ports.All(p => p >= min && p <= max));
+                Assert.AreEqual(ports.Length, ports.Distinct().Count());
+                Assert.AreEqual(0, agents[3].LocalCandidates.Count, "of the range taken: none");
+            }
+            finally
+            {
+                foreach (var agent in agents)
+                    agent.Dispose();
+            }
+        }
+
         private static async Task Connect(IceAgent a, IceAgent b)
         {
             await a.GatherCandidatesAsync();
