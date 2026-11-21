@@ -8,7 +8,7 @@ and two checks run on every `dotnet build` of each:
   as released; Unshipped is what changed since. A public symbol missing from them is a warning, RS0016, until it is
   listed - an addition breaks no one - and a listed one that is gone fails the build with RS0017.
 - **Package validation.** Each package being built is checked for its target frameworks agreeing
-  with one another: what netstandard2.0 offers, net472, net8.0 and net10.0 have to offer too. Once a
+  with one another: what netstandard2.0 offers, net472, net10.0 and net11.0 have to offer too. Once a
   library has a release, it is compared with that release as well, and every binary or source
   breaking change fails the build with a CP error.
 
