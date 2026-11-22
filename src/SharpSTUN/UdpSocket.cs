@@ -127,14 +127,80 @@ namespace SharpSTUN
         public int SendTo(byte[] buffer, int offset, int count, IPEndPoint to)
         {
 #if NET8_0_OR_GREATER
-            return _socket.SendTo(buffer.AsSpan(offset, count), SocketFlags.None, AddressOf(to));
+            return SendTo(buffer.AsSpan(offset, count), to);
 #else
             return _socket.SendTo(buffer, offset, count, SocketFlags.None, to);
 #endif
         }
 
+        /// <summary>
+        /// Datagrams of <paramref name="segment"/> bytes each, the last of what is left, back to back in the buffer: of one send
+        /// the system splits, of UDP segmentation offload - Windows 10 2004 (build 19041) and later, of UDP_SEND_MSG_SIZE, and
+        /// Linux 4.18 and later, of UDP_SEGMENT, set of the socket's options - or of a send of each, of any other system, of
+        /// .NET before 8, or of a socket of which the option or such a send ever failed.
+        /// </summary>
+        public void SendSegments(byte[] buffer, int offset, int count, int segment, IPEndPoint to)
+        {
 #if NET8_0_OR_GREATER
-        public int SendTo(ReadOnlySpan<byte> data, IPEndPoint to) => _socket.SendTo(data, SocketFlags.None, AddressOf(to));
+            if (Segmentation && !_unsegmented && count > segment)
+            {
+                lock (_segmentGate)
+                {
+                    if (!_unsegmented)
+                    {
+                        try
+                        {
+                            if (_segment != segment)
+                                SetSegment(segment);
+                            _socket.SendTo(buffer.AsSpan(offset, count), SocketFlags.None, AddressOf(to));
+                            return;
+                        }
+                        catch (SocketException)
+                        {
+                            // not of this socket, or of its interface: of a send of each from now on
+                            _unsegmented = true;
+                            try { SetSegment(0); } catch (SocketException) { }
+                        }
+                    }
+                }
+            }
+#endif
+            for (int at = 0; at < count; at += segment)
+                SendTo(buffer, offset + at, Math.Min(segment, count - at), to);
+        }
+
+#if NET8_0_OR_GREATER
+        // of the systems of segmentation offload, of their versions
+        private static readonly bool Segmentation = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041)
+            || (OperatingSystem.IsLinux() && Environment.OSVersion.Version >= new Version(4, 18));
+        // the segment size the socket has, 0 of none; of a socket of which it ever failed, a send of each. A send of more than the
+        //  size would be split of it, so of a system of segmentation each send is of the gate, and such a send puts it back to 0
+        private readonly object _segmentGate = new object();
+        private int _segment;
+        private volatile bool _unsegmented;
+
+        private void SetSegment(int segment)
+        {
+            if (OperatingSystem.IsWindows())
+                _socket.SetSocketOption(SocketOptionLevel.Udp, (SocketOptionName)2, segment); // UDP_SEND_MSG_SIZE
+            else
+                _socket.SetRawSocketOption(17, 103, BitConverter.GetBytes(segment)); // SOL_UDP, UDP_SEGMENT
+            _segment = segment;
+        }
+
+        public int SendTo(ReadOnlySpan<byte> data, IPEndPoint to)
+        {
+            if (!Segmentation)
+                return _socket.SendTo(data, SocketFlags.None, AddressOf(to));
+            lock (_segmentGate)
+            {
+                if (_segment != 0 && data.Length > _segment)
+                {
+                    try { SetSegment(0); } catch (SocketException) { _unsegmented = true; }
+                }
+                return _socket.SendTo(data, SocketFlags.None, AddressOf(to));
+            }
+        }
 
         private SocketAddress AddressOf(IPEndPoint to)
         {

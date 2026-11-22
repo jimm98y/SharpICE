@@ -116,6 +116,37 @@ namespace SharpICE.Tests
         }
 
         [TestMethod]
+        public async Task SendsSegmentsAsDatagramsOfTheirOwn()
+        {
+            using var controlling = CreateAgent(IceRole.Controlling);
+            using var controlled = CreateAgent(IceRole.Controlled);
+            await Connect(controlling, controlled);
+
+            var received = new System.Collections.Concurrent.ConcurrentQueue<byte[]>();
+            controlled.DataReceived += (s, e) => received.Enqueue(e.Buffer.AsSpan(e.Offset, e.Count).ToArray());
+
+            // five of 300 bytes and one of 120, each of its index: of segmentation offload or of a send of each, six datagrams
+            byte[] batch = new byte[5 * 300 + 120];
+            for (int i = 0; i < batch.Length; i++)
+                batch[i] = (byte)(i / 300);
+            Assert.IsTrue(controlling.SendSegments(batch, 0, batch.Length, 300));
+            // and then one of more than a segment, whole: the socket's segment size is not left to split it
+            Assert.IsTrue(controlling.Send(new byte[400], 0, 400));
+
+            DateTime deadline = DateTime.UtcNow + Timeout;
+            while (received.Count < 7 && DateTime.UtcNow < deadline)
+                await Task.Delay(20);
+            var datagrams = received.ToArray();
+            Assert.AreEqual(7, datagrams.Length);
+            for (int i = 0; i < 6; i++)
+            {
+                Assert.AreEqual(i < 5 ? 300 : 120, datagrams[i].Length);
+                Assert.IsTrue(datagrams[i].All(b => b == i));
+            }
+            Assert.AreEqual(400, datagrams[6].Length);
+        }
+
+        [TestMethod]
         public async Task ResolvesARoleConflict()
         {
             using var a = CreateAgent(IceRole.Controlling);
