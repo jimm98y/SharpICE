@@ -2023,39 +2023,6 @@ namespace SharpICE
             }
         }
 
-        /// <summary>
-        /// Sends datagrams of <paramref name="segment"/> bytes each, the last of what is left, back to back in the buffer, on
-        /// the selected pair: of UDP, of one send of UDP segmentation offload where the system has it (Windows 10 2004 and
-        /// later, Linux 4.18 and later), else of one of each; of a relay or of TCP, of one of each. False as of <see cref="Send"/>.
-        /// </summary>
-        public bool SendSegments(byte[] buffer, int offset, int count, int segment)
-        {
-            var pair = SelectedPair;
-            if (pair == null || _closed || State == IceConnectionState.Failed)
-                return false;
-            if (pair.IsStream || pair.Base.Turn != null || segment <= 0)
-            {
-                bool sent = true;
-                for (int at = 0; at < count; at += Math.Max(1, segment))
-                    sent &= Send(buffer, offset + at, segment <= 0 ? count : Math.Min(segment, count - at));
-                return sent;
-            }
-            try
-            {
-                pair.Base.Sender.SendSegments(buffer, offset, count, segment, pair.RemoteEndPoint);
-                return true;
-            }
-            catch (ObjectDisposedException)
-            {
-                return false;
-            }
-            catch (SocketException ex)
-            {
-                Trace($"Send to {pair.RemoteEndPoint} failed: {ex.SocketErrorCode}");
-                return false;
-            }
-        }
-
         // through the relay: of a permission of the peer's address installed first, of none yet; a buffer of the pool's, back to it
         private async Task SendRelayedAsync(TurnClient turn, IPEndPoint to, byte[] buffer, int offset, int count, bool pooled = false)
         {

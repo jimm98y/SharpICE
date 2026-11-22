@@ -4,5 +4,3 @@ SharpICE.IceAgentOptions.TlsStack.get -> SharpSTUN.ITlsStack
 SharpICE.IceAgentOptions.TlsStack.set -> void
 SharpICE.IceAgentOptions.MaxTcpConnectionsPerAddress.get -> int
 SharpICE.IceAgentOptions.MaxTcpConnectionsPerAddress.set -> void
-
-SharpICE.IceAgent.SendSegments(byte[] buffer, int offset, int count, int segment) -> bool
