@@ -227,9 +227,24 @@ namespace SharpICE
             foreach (var idle in s_idle)
             {
                 if (Interlocked.Exchange(ref idle.Key._tickQueued, 1) == 0)
+#if NET
+                    ThreadPool.UnsafeQueueUserWorkItem(idle.Key._tickItem ??= new TickItem(idle.Key), false);
+#else
                     ThreadPool.UnsafeQueueUserWorkItem(s_tick, idle.Key);
+#endif
             }
         }, null, IdleCheckInterval, IdleCheckInterval);
+#if NET
+        // the agent's tick queued of one item of its own: of a callback and its state, an item made of each, of 1000 agents
+        //  4000 a second
+        private sealed class TickItem : IThreadPoolWorkItem
+        {
+            private readonly IceAgent _agent;
+            public TickItem(IceAgent agent) => _agent = agent;
+            public void Execute() => s_tick(_agent);
+        }
+        private TickItem _tickItem;
+#endif
         private int _ticking;
         private bool _gathered;
         private bool _started;
