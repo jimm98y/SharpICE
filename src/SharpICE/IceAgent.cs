@@ -494,6 +494,9 @@ namespace SharpICE
         private Socket Bind(IPAddress address)
         {
             var socket = new Socket(address.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            // of a burst of a peer's pacer - 40 ms of 2.5 times a 4K stream's 16 Mbit/s, 200 KB - more than Windows' 64 KB: of 16
+            //  streams of 4K, 8% of the video lost, of 256 KB some; of 1 MB none (the kernel's, of what is queued alone)
+            socket.ReceiveBufferSize = 1 << 20;
             try
             {
                 // Windows reports an ICMP port unreachable of a datagram sent before as a reset of the next receive
